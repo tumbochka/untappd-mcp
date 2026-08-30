@@ -7,7 +7,7 @@ A multi-user [Model Context Protocol](https://modelcontextprotocol.io/) server f
 - Streamable HTTP endpoint: `POST /mcp`
 - OAuth 2.1 authorization-code flow with mandatory PKCE S256
 - OAuth protected-resource and authorization-server metadata
-- Claude Client ID Metadata Document (CIMD) support, plus OAuth 2.0 Dynamic Client Registration fallback
+- Claude Client ID Metadata Document (CIMD) support and a pre-registered public Claude client fallback
 - Short-lived, audience-bound opaque access tokens and rotating refresh tokens
 - Firebase Auth Google sign-in and a secure server-side browser session
 - `search_beers` and `get_beer`
@@ -30,7 +30,7 @@ Firebase browser sign-in ──> MCP OAuth server ── MCP access token ──
 
 Firebase Auth identifies the person in the browser and creates a secure HTTP-only session. The MCP authorization server then issues its own access token whose owner is that Firebase `uid`, whose audience is exactly this server’s `/mcp` URL, and whose scopes are `untappd:read` and `untappd:write`.
 
-Unauthenticated MCP requests receive `401` with protected-resource metadata. A compatible client such as Claude discovers the authorization server, resolves its hosted client metadata (or registers a public OAuth client when needed), sends the user through Firebase sign-in and the consent screen, then exchanges a PKCE-protected code for MCP tokens.
+Unauthenticated MCP requests receive `401` with protected-resource metadata. A compatible client such as Claude discovers the authorization server, resolves its hosted client metadata (or uses the pre-registered public Claude client), sends the user through Firebase sign-in and the consent screen, then exchanges a PKCE-protected code for MCP tokens.
 
 | Endpoint | Purpose |
 | --- | --- |
@@ -38,7 +38,7 @@ Unauthenticated MCP requests receive `401` with protected-resource metadata. A c
 | `GET /health` | Unauthenticated liveness endpoint. |
 | `GET /.well-known/oauth-protected-resource` | Protected-resource metadata. The `/mcp` suffix variant is also served. |
 | `GET /.well-known/oauth-authorization-server` | OAuth authorization-server metadata. |
-| `POST /oauth/register` | Dynamic Client Registration for public clients. |
+| `POST /oauth/register` | Dynamic Client Registration implementation; intentionally not advertised in metadata. |
 | `GET /oauth/authorize` | Authorization request, Firebase browser sign-in, then consent. |
 | `POST /oauth/token` | Authorization-code and refresh-token grants. |
 | `GET /connect/untappd` | Starts the separate Untappd authorization flow for the signed-in Firebase user. |
@@ -53,6 +53,17 @@ The server keeps only hashes of MCP access, authorization-code, and refresh toke
 4. The server exchanges the code, fetches the profile, and stores the encrypted token under `untappd_credentials/{firebaseUid}`.
 
 Legacy field `users/{uid}.untappdAccessToken` is intentionally not read. Migrate it through an admin-only one-time job after Firestore rules have been closed; do not expose that field to browsers.
+
+## Claude connector setup
+
+Use `https://YOUR_CLOUD_RUN_OR_CUSTOM_DOMAIN/mcp` as the connector URL. Select **Always required** authentication. If Claude does not use its hosted client metadata and reports that automatic client registration is unsupported, choose **Use your own OAuth client** and enter:
+
+```text
+Client ID: untappd-mcp-claude
+Client secret: leave blank
+```
+
+This is a public OAuth client restricted to Claude's exact HTTPS callback URL. PKCE S256 remains mandatory, so the client ID is not a secret.
 
 ## Local development
 

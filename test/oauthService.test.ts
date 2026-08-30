@@ -1,7 +1,12 @@
 import { createHash } from 'node:crypto';
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { McpOAuthService, OAuthProtocolError, type OAuthAuthorizationRequest } from '../src/oauth/service.js';
+import {
+  CLAUDE_PRE_REGISTERED_CLIENT_ID,
+  McpOAuthService,
+  OAuthProtocolError,
+  type OAuthAuthorizationRequest,
+} from '../src/oauth/service.js';
 import {
   type AccessToken,
   type AuthorizationCode,
@@ -215,5 +220,23 @@ test('OAuth accepts the validated Claude client metadata document', async () => 
   );
 
   assert.equal(request.client.clientId, claudeClientId);
+  assert.equal(request.redirectUri, 'https://claude.ai/api/mcp/auth_callback');
+});
+
+test('OAuth accepts the pre-registered public Claude client', async () => {
+  const oauth = new McpOAuthService(new MemoryOAuthStore(), new URL('https://untappd-mcp.example.com'), 900, 3600);
+  const request = await oauth.validateAuthorizationRequest(
+    new URLSearchParams({
+      response_type: 'code',
+      client_id: CLAUDE_PRE_REGISTERED_CLIENT_ID,
+      redirect_uri: 'https://claude.ai/api/mcp/auth_callback',
+      resource: oauth.resource,
+      scope: 'untappd:read',
+      code_challenge: pkceChallenge('e'.repeat(64)),
+      code_challenge_method: 'S256',
+    })
+  );
+
+  assert.equal(request.client.clientId, CLAUDE_PRE_REGISTERED_CLIENT_ID);
   assert.equal(request.redirectUri, 'https://claude.ai/api/mcp/auth_callback');
 });

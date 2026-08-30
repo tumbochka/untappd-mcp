@@ -15,6 +15,14 @@ export type McpScope = (typeof MCP_SCOPES)[number];
 const supportedScopes = new Set<string>(MCP_SCOPES);
 const claudeClientMetadataUrl = 'https://claude.ai/oauth/mcp-oauth-client-metadata';
 const claudeCallbackUrl = 'https://claude.ai/api/mcp/auth_callback';
+export const CLAUDE_PRE_REGISTERED_CLIENT_ID = 'untappd-mcp-claude';
+
+const claudePreRegisteredClient: OAuthClient = {
+  clientId: CLAUDE_PRE_REGISTERED_CLIENT_ID,
+  clientName: 'Claude',
+  redirectUris: [claudeCallbackUrl],
+  createdAt: 0,
+};
 
 export class OAuthProtocolError extends Error {
   constructor(
@@ -235,7 +243,9 @@ export class McpOAuthService {
     const clientId = required(parameters.get('client_id'), 'client_id');
     const client = clientId === claudeClientMetadataUrl
       ? await this.resolveClientMetadata(clientId)
-      : await this.store.getClient(clientId);
+      : clientId === CLAUDE_PRE_REGISTERED_CLIENT_ID
+        ? claudePreRegisteredClient
+        : await this.store.getClient(clientId);
     if (!client) {
       throw new OAuthProtocolError('unauthorized_client', 'Unknown client_id');
     }
