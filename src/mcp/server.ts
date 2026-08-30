@@ -5,6 +5,8 @@ import { UntappdApiError, UntappdClient } from '../untappd/client.js';
 
 type UntappdMcpDependencies = {
   firebaseUid: string | undefined;
+  scopes: string[];
+  untappdConnectUrl: string;
   credentialStore: CredentialStore;
   untappd: UntappdClient;
 };
@@ -20,6 +22,18 @@ function errorResult(code: string, message: string) {
     content: [{ type: 'text' as const, text: JSON.stringify({ error: code, message }) }],
     isError: true,
   };
+}
+
+function hasScope(dependencies: UntappdMcpDependencies, scope: string): boolean {
+  return dependencies.scopes.includes(scope);
+}
+
+function scopeError(scope: string) {
+  return errorResult('MCP_INSUFFICIENT_SCOPE', `Authorize this MCP client with the ${scope} scope.`);
+}
+
+function untappdNotConnected(dependencies: UntappdMcpDependencies) {
+  return errorResult('UNTAPPD_NOT_CONNECTED', `Connect your Untappd account at ${dependencies.untappdConnectUrl}.`);
 }
 
 function handleUntappdError(error: unknown) {
@@ -64,6 +78,9 @@ export function createUntappdMcpServer(dependencies: UntappdMcpDependencies): Mc
       annotations: { readOnlyHint: true },
     },
     async ({ query, limit }) => {
+      if (!hasScope(dependencies, 'untappd:read')) {
+        return scopeError('untappd:read');
+      }
       try {
         const credential = dependencies.firebaseUid
           ? await dependencies.credentialStore.get(dependencies.firebaseUid)
@@ -84,6 +101,9 @@ export function createUntappdMcpServer(dependencies: UntappdMcpDependencies): Mc
       annotations: { readOnlyHint: true },
     },
     async ({ beerId }) => {
+      if (!hasScope(dependencies, 'untappd:read')) {
+        return scopeError('untappd:read');
+      }
       try {
         const credential = dependencies.firebaseUid
           ? await dependencies.credentialStore.get(dependencies.firebaseUid)
@@ -103,12 +123,15 @@ export function createUntappdMcpServer(dependencies: UntappdMcpDependencies): Mc
       annotations: { readOnlyHint: true },
     },
     async () => {
+      if (!hasScope(dependencies, 'untappd:read')) {
+        return scopeError('untappd:read');
+      }
       try {
         const profile = await withCredential(dependencies, credential =>
           dependencies.untappd.getCurrentUser(credential.accessToken)
         );
         return profile === null
-          ? errorResult('UNTAPPD_NOT_CONNECTED', 'Connect your Untappd account before using this tool.')
+          ? untappdNotConnected(dependencies)
           : jsonResult(profile);
       } catch (error) {
         return handleUntappdError(error);
@@ -128,12 +151,15 @@ export function createUntappdMcpServer(dependencies: UntappdMcpDependencies): Mc
       annotations: { readOnlyHint: true },
     },
     async ({ limit, offset }) => {
+      if (!hasScope(dependencies, 'untappd:read')) {
+        return scopeError('untappd:read');
+      }
       try {
         const wishlist = await withCredential(dependencies, credential =>
           dependencies.untappd.getWishlist(credential.accessToken, limit, offset)
         );
         return wishlist === null
-          ? errorResult('UNTAPPD_NOT_CONNECTED', 'Connect your Untappd account before using this tool.')
+          ? untappdNotConnected(dependencies)
           : jsonResult(wishlist);
       } catch (error) {
         return handleUntappdError(error);
@@ -153,12 +179,15 @@ export function createUntappdMcpServer(dependencies: UntappdMcpDependencies): Mc
       annotations: { readOnlyHint: true },
     },
     async ({ limit, offset }) => {
+      if (!hasScope(dependencies, 'untappd:read')) {
+        return scopeError('untappd:read');
+      }
       try {
         const beers = await withCredential(dependencies, credential =>
           dependencies.untappd.getDistinctBeers(credential.accessToken, limit, offset)
         );
         return beers === null
-          ? errorResult('UNTAPPD_NOT_CONNECTED', 'Connect your Untappd account before using this tool.')
+          ? untappdNotConnected(dependencies)
           : jsonResult(beers);
       } catch (error) {
         return handleUntappdError(error);
@@ -182,6 +211,9 @@ export function createUntappdMcpServer(dependencies: UntappdMcpDependencies): Mc
       annotations: { destructiveHint: false, idempotentHint: false },
     },
     async ({ beerId, rating, shout, timezone, gmtOffset }) => {
+      if (!hasScope(dependencies, 'untappd:write')) {
+        return scopeError('untappd:write');
+      }
       try {
         const checkin = await withCredential(dependencies, credential =>
           dependencies.untappd.checkIn({
@@ -194,7 +226,7 @@ export function createUntappdMcpServer(dependencies: UntappdMcpDependencies): Mc
           })
         );
         return checkin === null
-          ? errorResult('UNTAPPD_NOT_CONNECTED', 'Connect your Untappd account before using this tool.')
+          ? untappdNotConnected(dependencies)
           : jsonResult(checkin);
       } catch (error) {
         return handleUntappdError(error);

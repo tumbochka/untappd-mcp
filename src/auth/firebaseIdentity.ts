@@ -8,6 +8,11 @@ export type FirebasePrincipal = {
   scopes: string[];
 };
 
+export type FirebaseSession = {
+  uid: string;
+  expiresAt: number;
+};
+
 function firebaseApp(projectId?: string): App {
   return getApps()[0] ?? initializeApp({ credential: applicationDefault(), projectId });
 }
@@ -40,5 +45,19 @@ export class FirebaseIdentityVerifier {
       expiresAt: decoded.exp,
       scopes,
     };
+  }
+
+  async createSessionCookie(idToken: string, expiresInMilliseconds: number): Promise<string> {
+    const decoded = await this.auth.verifyIdToken(idToken, true);
+    const authTime = decoded.auth_time;
+    if (!authTime || Date.now() / 1000 - authTime > 5 * 60) {
+      throw new Error('Firebase sign-in is too old to create an OAuth browser session');
+    }
+    return this.auth.createSessionCookie(idToken, { expiresIn: expiresInMilliseconds });
+  }
+
+  async verifySessionCookie(cookie: string): Promise<FirebaseSession> {
+    const decoded = await this.auth.verifySessionCookie(cookie, true);
+    return { uid: decoded.uid, expiresAt: decoded.exp };
   }
 }

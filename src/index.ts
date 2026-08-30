@@ -1,27 +1,41 @@
+import { randomBytes } from 'node:crypto';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { URL } from 'node:url';
-import { toNodeHandler, hostHeaderValidation, originValidation } from '@modelcontextprotocol/node';
+import { hostHeaderValidation, originValidation, toNodeHandler } from '@modelcontextprotocol/node';
 import { createMcpHandler, type AuthInfo } from '@modelcontextprotocol/server';
 import { ConnectStateSigner } from './auth/connectState.js';
-import { FirebaseIdentityVerifier, type FirebasePrincipal } from './auth/firebaseIdentity.js';
+import { FirebaseIdentityVerifier, type FirebaseSession } from './auth/firebaseIdentity.js';
 import { loadConfig } from './config.js';
 import { FirestoreCredentialStore } from './credentials/credentialStore.js';
 import { TokenCipher } from './credentials/tokenCipher.js';
+import { cookieValue, expiredCookie, HttpRequestError, readForm, readJson, sessionCookie } from './http.js';
 import { createUntappdMcpServer } from './mcp/server.js';
+import { authorizationConsentPage, firebaseLoginPage } from './oauth/html.js';
+import { McpOAuthService, MCP_SCOPES, OAuthProtocolError } from './oauth/service.js';
+import { FirestoreOAuthStore } from './oauth/store.js';
 import { UntappdClient } from './untappd/client.js';
 
 type AuthenticatedRequest = IncomingMessage & { auth?: AuthInfo };
 
+const sessionCookieName = '__Host-untappd-mcp-session';
 const config = loadConfig();
-const identityVerifier = new FirebaseIdentityVerifier(config.firebaseProjectId);
+const firebaseIdentity = new FirebaseIdentityVerifier(config.firebaseProjectId);
 const credentialStore = new FirestoreCredentialStore(new TokenCipher(config.tokenEncryptionKey));
 const untappd = new UntappdClient(config.untappd);
 const stateSigner = new ConnectStateSigner(config.connectStateSecret);
+const oauth = new McpOAuthService(
+  new FirestoreOAuthStore(),
+  config.publicBaseUrl,
+  config.oauth.accessTokenTtlSeconds,
+  config.oauth.refreshTokenTtlSeconds
+);
 
 const mcpHandler = createMcpHandler(
   ({ authInfo }) =>
     createUntappdMcpServer({
-      firebaseUid: authInfo?.clientId,
+      firebaseUid: typeof authInfo?.extra?.firebaseUid === 'string' ? authInfo.extra.firebaseUid : undefined,
+      scopes: authInfo?.scopes ?? [],
+      untappdConnectUrl: new URL('/connect/untappd', config.publicBaseUrl).toString(),
       credentialStore,
       untappd,
     }),
@@ -33,56 +47,284 @@ const nodeMcpHandler = toNodeHandler(mcpHandler, {
 const validateHost = hostHeaderValidation(config.allowedHostnames);
 const validateOrigin = originValidation(config.allowedOriginHostnames);
 
-function writeJson(response: ServerResponse, status: number, data: unknown): void {
-  response.writeHead(status, { 'content-type': 'application/json; charset=utf-8' });
+function writeJson(
+  response: ServerResponse,
+  status: number,
+  data: unknown,
+  headers: Record<string, string> = {}
+): void {
+  response.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', ...headers });
   response.end(JSON.stringify(data));
 }
 
-function writeHtml(response: ServerResponse, status: number, html: string): void {
-  response.writeHead(status, { 'content-type': 'text/html; charset=utf-8' });
+function nonce(): string {
+  return randomBytes(16).toString('base64');
+}
+
+function writeHtml(response: ServerResponse, status: number, html: string, pageNonce: string): void {
+  response.writeHead(status, {
+    'content-type': 'text/html; charset=utf-8',
+    'cache-control': 'no-store',
+    'referrer-policy': 'no-referrer',
+    'content-security-policy': [
+      "default-src 'none'",
+      `style-src 'nonce-${pageNonce}'`,
+      `script-src 'nonce-${pageNonce}' https://www.gstatic.com`,
+      "connect-src 'self' https://identitytoolkit.googleapis.com https://securetoken.googleapis.com https://www.googleapis.com",
+      'frame-src https://accounts.google.com https://*.firebaseapp.com',
+      "base-uri 'none'",
+      "form-action 'self'",
+    ].join('; '),
+  });
   response.end(html);
 }
 
-async function authenticate(request: IncomingMessage, response: ServerResponse): Promise<FirebasePrincipal | null> {
-  try {
-    return await identityVerifier.verify(request.headers.authorization);
-  } catch (error) {
-    console.warn('Rejected unauthenticated request', error instanceof Error ? error.message : error);
-    response.writeHead(401, {
-      'content-type': 'application/json; charset=utf-8',
-      'www-authenticate': 'Bearer realm="untappd-mcp"',
-    });
-    response.end(JSON.stringify({ error: 'unauthorized', message: 'A valid Firebase ID token is required.' }));
-    return null;
-  }
+function writeRedirect(response: ServerResponse, location: string): void {
+  response.writeHead(302, { location, 'cache-control': 'no-store', 'referrer-policy': 'no-referrer' });
+  response.end();
 }
 
-function asMcpAuthInfo(principal: FirebasePrincipal): AuthInfo {
-  return {
-    token: principal.accessToken,
-    clientId: principal.uid,
-    scopes: principal.scopes,
-    expiresAt: principal.expiresAt,
-    resource: new URL('/mcp', config.publicBaseUrl),
-    extra: { firebaseUid: principal.uid, identityProvider: 'firebase' },
-  };
+function writeOAuthError(response: ServerResponse, error: unknown): void {
+  if (error instanceof OAuthProtocolError) {
+    writeJson(response, error.status, { error: error.error, error_description: error.message });
+    return;
+  }
+  if (error instanceof HttpRequestError) {
+    writeJson(response, error.status, { error: 'invalid_request', error_description: error.message });
+    return;
+  }
+  console.error('OAuth request failed', error);
+  writeJson(response, 500, { error: 'server_error', error_description: 'OAuth request could not be completed' });
 }
 
 function requestUrl(request: IncomingMessage): URL {
   return new URL(request.url ?? '/', config.publicBaseUrl);
 }
 
+function appendParameters(location: string, parameters: Record<string, string | undefined>): string {
+  const url = new URL(location);
+  for (const [key, value] of Object.entries(parameters)) {
+    if (value !== undefined) {
+      url.searchParams.set(key, value);
+    }
+  }
+  return url.toString();
+}
+
+function sessionContinuation(value: string | null): string {
+  if (!value) {
+    throw new OAuthProtocolError('invalid_request', 'Missing continuation URL');
+  }
+  let url: URL;
+  try {
+    url = new URL(value, config.publicBaseUrl);
+  } catch {
+    throw new OAuthProtocolError('invalid_request', 'Invalid continuation URL');
+  }
+  if (url.origin !== config.publicBaseUrl.origin || !['/oauth/authorize', '/connect/untappd'].includes(url.pathname)) {
+    throw new OAuthProtocolError('invalid_request', 'Invalid continuation URL');
+  }
+  return `${url.pathname}${url.search}`;
+}
+
+async function firebaseSession(request: IncomingMessage): Promise<FirebaseSession | null> {
+  const value = cookieValue(request.headers.cookie, sessionCookieName);
+  if (!value) {
+    return null;
+  }
+  try {
+    return await firebaseIdentity.verifySessionCookie(value);
+  } catch {
+    return null;
+  }
+}
+
+async function connectFirebaseUid(request: IncomingMessage): Promise<string | null> {
+  const session = await firebaseSession(request);
+  if (session) {
+    return session.uid;
+  }
+  try {
+    return (await firebaseIdentity.verify(request.headers.authorization)).uid;
+  } catch {
+    return null;
+  }
+}
+
+function asMcpAuthInfo(principal: Awaited<ReturnType<typeof oauth.authenticate>>): AuthInfo {
+  return {
+    token: principal.accessToken,
+    clientId: principal.clientId,
+    scopes: principal.scopes,
+    expiresAt: principal.expiresAt,
+    resource: new URL(oauth.resource),
+    extra: { firebaseUid: principal.firebaseUid, authorizationServer: oauth.issuer },
+  };
+}
+
+function resourceMetadata(): Record<string, unknown> {
+  return {
+    resource: oauth.resource,
+    authorization_servers: [oauth.issuer],
+    scopes_supported: MCP_SCOPES,
+    bearer_methods_supported: ['header'],
+  };
+}
+
+function authorizationServerMetadata(): Record<string, unknown> {
+  return {
+    issuer: oauth.issuer,
+    authorization_endpoint: `${oauth.issuer}/oauth/authorize`,
+    token_endpoint: `${oauth.issuer}/oauth/token`,
+    registration_endpoint: `${oauth.issuer}/oauth/register`,
+    response_types_supported: ['code'],
+    grant_types_supported: ['authorization_code', 'refresh_token'],
+    token_endpoint_auth_methods_supported: ['none'],
+    code_challenge_methods_supported: ['S256'],
+    scopes_supported: MCP_SCOPES,
+  };
+}
+
+function mcpUnauthorized(response: ServerResponse, message: string): void {
+  writeJson(
+    response,
+    401,
+    { error: 'unauthorized', message },
+    {
+      'www-authenticate': `Bearer resource_metadata="${config.publicBaseUrl.origin}/.well-known/oauth-protected-resource"`,
+    }
+  );
+}
+
+async function handleFirebaseSession(request: IncomingMessage, response: ServerResponse): Promise<void> {
+  const [scheme, idToken] = request.headers.authorization?.split(/\s+/, 2) ?? [];
+  if (scheme !== 'Bearer' || !idToken) {
+    writeJson(response, 401, { error: 'unauthorized', message: 'A Firebase ID token is required.' });
+    return;
+  }
+  try {
+    const cookie = await firebaseIdentity.createSessionCookie(idToken, config.oauth.sessionTtlSeconds * 1000);
+    response.writeHead(204, {
+      'set-cookie': sessionCookie(sessionCookieName, cookie, config.oauth.sessionTtlSeconds),
+      'cache-control': 'no-store',
+    });
+    response.end();
+  } catch (error) {
+    console.warn('Rejected Firebase browser session', error);
+    writeJson(response, 401, { error: 'unauthorized', message: 'Firebase sign-in could not be verified.' });
+  }
+}
+
+async function handleLogin(request: IncomingMessage, response: ServerResponse): Promise<void> {
+  const continueTo = sessionContinuation(requestUrl(request).searchParams.get('continue'));
+  const pageNonce = nonce();
+  writeHtml(
+    response,
+    200,
+    firebaseLoginPage({
+      firebase: {
+        apiKey: config.firebaseWeb.apiKey,
+        authDomain: config.firebaseWeb.authDomain,
+        appId: config.firebaseWeb.appId,
+        projectId: config.firebaseProjectId,
+      },
+      continueTo,
+      nonce: pageNonce,
+    }),
+    pageNonce
+  );
+}
+
+async function handleAuthorize(request: IncomingMessage, response: ServerResponse): Promise<void> {
+  const url = requestUrl(request);
+  const authorizationRequest = await oauth.validateAuthorizationRequest(url.searchParams);
+  const session = await firebaseSession(request);
+  if (!session) {
+    writeRedirect(response, `/oauth/login?continue=${encodeURIComponent(`${url.pathname}${url.search}`)}`);
+    return;
+  }
+  const transaction = await oauth.createAuthorizationTransaction(authorizationRequest, session.uid);
+  const pageNonce = nonce();
+  writeHtml(
+    response,
+    200,
+    authorizationConsentPage({
+      clientName: authorizationRequest.client.clientName,
+      redirectUri: authorizationRequest.redirectUri,
+      scopes: authorizationRequest.scopes,
+      transactionId: transaction.id,
+      nonce: pageNonce,
+    }),
+    pageNonce
+  );
+}
+
+async function handleConsent(request: IncomingMessage, response: ServerResponse): Promise<void> {
+  const session = await firebaseSession(request);
+  if (!session) {
+    writeJson(response, 401, { error: 'login_required', message: 'Sign in again before authorizing this client.' });
+    return;
+  }
+  const form = await readForm(request);
+  const transactionId = form.get('transaction_id');
+  if (!transactionId || transactionId.length > 256) {
+    throw new OAuthProtocolError('invalid_request', 'Invalid authorization transaction');
+  }
+  if (form.get('decision') === 'deny') {
+    const denied = await oauth.denyAuthorizationTransaction(transactionId, session.uid);
+    writeRedirect(
+      response,
+      appendParameters(denied.redirectUri, {
+        error: 'access_denied',
+        error_description: 'The resource owner denied access',
+        state: denied.state,
+      })
+    );
+    return;
+  }
+  if (form.get('decision') !== 'approve') {
+    throw new OAuthProtocolError('invalid_request', 'Invalid authorization decision');
+  }
+  const approved = await oauth.approveAuthorizationTransaction(transactionId, session.uid);
+  writeRedirect(response, appendParameters(approved.redirectUri, { code: approved.code, state: approved.state }));
+}
+
+async function handleToken(request: IncomingMessage, response: ServerResponse): Promise<void> {
+  const form = await readForm(request);
+  const grantType = form.get('grant_type');
+  let token;
+  if (grantType === 'authorization_code') {
+    token = await oauth.exchangeAuthorizationCode(form);
+  } else if (grantType === 'refresh_token') {
+    token = await oauth.refresh(form);
+  } else {
+    throw new OAuthProtocolError('unsupported_grant_type', 'Supported grants are authorization_code and refresh_token');
+  }
+  writeJson(response, 200, token);
+}
+
+async function handleRegister(request: IncomingMessage, response: ServerResponse): Promise<void> {
+  const client = await oauth.registerClient(await readJson(request));
+  writeJson(response, 201, {
+    client_id: client.clientId,
+    client_id_issued_at: client.createdAt,
+    client_name: client.clientName,
+    redirect_uris: client.redirectUris,
+    token_endpoint_auth_method: 'none',
+  });
+}
+
 async function handleUntappdConnect(request: IncomingMessage, response: ServerResponse): Promise<void> {
-  const principal = await authenticate(request, response);
-  if (!principal) {
+  const firebaseUid = await connectFirebaseUid(request);
+  if (!firebaseUid) {
+    writeRedirect(response, '/oauth/login?continue=%2Fconnect%2Funtappd');
     return;
   }
   const state = stateSigner.sign({
-    firebaseUid: principal.uid,
+    firebaseUid,
     expiresAt: Math.floor(Date.now() / 1000) + 10 * 60,
   });
-  response.writeHead(302, { location: untappd.authorizationUrl(state), 'cache-control': 'no-store' });
-  response.end();
+  writeRedirect(response, untappd.authorizationUrl(state));
 }
 
 async function handleUntappdCallback(request: IncomingMessage, response: ServerResponse): Promise<void> {
@@ -93,21 +335,20 @@ async function handleUntappdCallback(request: IncomingMessage, response: ServerR
     writeJson(response, 400, { error: 'invalid_callback', message: 'Untappd code and state are required.' });
     return;
   }
-
   try {
     const { firebaseUid } = stateSigner.verify(state);
     const accessToken = await untappd.exchangeAuthorizationCode(code);
-    const profile = (await untappd.getCurrentUser(accessToken)) as {
-      user?: { user_name?: string };
-    };
+    const profile = (await untappd.getCurrentUser(accessToken)) as { user?: { user_name?: string } };
     await credentialStore.save(firebaseUid, {
       accessToken,
       untappdUserName: profile.user?.user_name,
     });
+    const pageNonce = nonce();
     writeHtml(
       response,
       200,
-      '<!doctype html><title>Untappd connected</title><p>Untappd is connected. You can close this window.</p>'
+      '<!doctype html><title>Untappd connected</title><p>Untappd is connected. You can close this window.</p>',
+      pageNonce
     );
   } catch (error) {
     console.error('Untappd OAuth callback failed', error);
@@ -115,38 +356,92 @@ async function handleUntappdCallback(request: IncomingMessage, response: ServerR
   }
 }
 
+async function handleMcp(request: IncomingMessage, response: ServerResponse): Promise<void> {
+  try {
+    const principal = await oauth.authenticate(request.headers.authorization);
+    (request as AuthenticatedRequest).auth = asMcpAuthInfo(principal);
+    await nodeMcpHandler(request as AuthenticatedRequest, response);
+  } catch (error) {
+    if (error instanceof OAuthProtocolError) {
+      mcpUnauthorized(response, error.message);
+      return;
+    }
+    console.error('MCP authentication failed', error);
+    mcpUnauthorized(response, 'MCP authentication could not be completed.');
+  }
+}
+
 const httpServer = createServer(async (request, response) => {
   if (!validateHost(request, response) || !validateOrigin(request, response)) {
     return;
   }
-
   const url = requestUrl(request);
-  if (request.method === 'GET' && url.pathname === '/healthz') {
-    writeJson(response, 200, { status: 'ok' });
-    return;
-  }
-  if (request.method === 'GET' && url.pathname === '/connect/untappd') {
-    await handleUntappdConnect(request, response);
-    return;
-  }
-  if (request.method === 'GET' && url.pathname === '/connect/untappd/callback') {
-    await handleUntappdCallback(request, response);
-    return;
-  }
-  if (url.pathname === '/mcp') {
-    const principal = await authenticate(request, response);
-    if (!principal) {
+  try {
+    if (request.method === 'GET' && url.pathname === '/healthz') {
+      writeJson(response, 200, { status: 'ok' });
       return;
     }
-    (request as AuthenticatedRequest).auth = asMcpAuthInfo(principal);
-    await nodeMcpHandler(request as AuthenticatedRequest, response);
-    return;
+    if (
+      request.method === 'GET' &&
+      (url.pathname === '/.well-known/oauth-protected-resource' ||
+        url.pathname === '/.well-known/oauth-protected-resource/mcp')
+    ) {
+      writeJson(response, 200, resourceMetadata());
+      return;
+    }
+    if (request.method === 'GET' && url.pathname === '/.well-known/oauth-authorization-server') {
+      writeJson(response, 200, authorizationServerMetadata());
+      return;
+    }
+    if (request.method === 'GET' && url.pathname === '/oauth/login') {
+      await handleLogin(request, response);
+      return;
+    }
+    if (request.method === 'POST' && url.pathname === '/oauth/firebase/session') {
+      await handleFirebaseSession(request, response);
+      return;
+    }
+    if (request.method === 'POST' && url.pathname === '/oauth/logout') {
+      response.writeHead(204, { 'set-cookie': expiredCookie(sessionCookieName), 'cache-control': 'no-store' });
+      response.end();
+      return;
+    }
+    if (request.method === 'GET' && url.pathname === '/oauth/authorize') {
+      await handleAuthorize(request, response);
+      return;
+    }
+    if (request.method === 'POST' && url.pathname === '/oauth/authorize/consent') {
+      await handleConsent(request, response);
+      return;
+    }
+    if (request.method === 'POST' && url.pathname === '/oauth/token') {
+      await handleToken(request, response);
+      return;
+    }
+    if (request.method === 'POST' && url.pathname === '/oauth/register') {
+      await handleRegister(request, response);
+      return;
+    }
+    if (request.method === 'GET' && url.pathname === '/connect/untappd') {
+      await handleUntappdConnect(request, response);
+      return;
+    }
+    if (request.method === 'GET' && url.pathname === '/connect/untappd/callback') {
+      await handleUntappdCallback(request, response);
+      return;
+    }
+    if (url.pathname === '/mcp') {
+      await handleMcp(request, response);
+      return;
+    }
+    writeJson(response, 404, { error: 'not_found' });
+  } catch (error) {
+    writeOAuthError(response, error);
   }
-  writeJson(response, 404, { error: 'not_found' });
 });
 
 httpServer.listen(config.port, () => {
-  console.log(`Untappd MCP listening on ${config.publicBaseUrl.origin}/mcp`);
+  console.log(`Untappd MCP listening on ${oauth.resource}`);
 });
 
 async function shutdown(signal: string): Promise<void> {

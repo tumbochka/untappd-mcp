@@ -5,7 +5,17 @@ export type AppConfig = {
   publicBaseUrl: URL;
   allowedOriginHostnames: string[];
   allowedHostnames: string[];
-  firebaseProjectId?: string;
+  firebaseProjectId: string;
+  firebaseWeb: {
+    apiKey: string;
+    authDomain: string;
+    appId: string;
+  };
+  oauth: {
+    accessTokenTtlSeconds: number;
+    refreshTokenTtlSeconds: number;
+    sessionTtlSeconds: number;
+  };
   untappd: {
     clientId: string;
     clientSecret: string;
@@ -30,6 +40,14 @@ function parsePort(value: string | undefined): number {
     throw new Error('PORT must be an integer between 1 and 65535');
   }
   return port;
+}
+
+function parseSeconds(name: string, value: string | undefined, fallback: number, min: number, max: number): number {
+  const parsed = Number(value ?? fallback);
+  if (!Number.isInteger(parsed) || parsed < min || parsed > max) {
+    throw new Error(`${name} must be an integer between ${min} and ${max}`);
+  }
+  return parsed;
 }
 
 function parseUrl(name: string, value: string): URL {
@@ -64,9 +82,33 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env): AppCon
   return {
     port: parsePort(environment.PORT),
     publicBaseUrl,
-    allowedOriginHostnames: originHostnames(environment.MCP_ALLOWED_ORIGINS),
+    allowedOriginHostnames: Array.from(
+      new Set([publicBaseUrl.hostname, ...originHostnames(environment.MCP_ALLOWED_ORIGINS)])
+    ),
     allowedHostnames: [publicBaseUrl.hostname, 'localhost', '127.0.0.1', '[::1]'],
-    firebaseProjectId: environment.FIREBASE_PROJECT_ID?.trim() || undefined,
+    firebaseProjectId: required('FIREBASE_PROJECT_ID', environment),
+    firebaseWeb: {
+      apiKey: required('FIREBASE_WEB_API_KEY', environment),
+      authDomain: required('FIREBASE_AUTH_DOMAIN', environment),
+      appId: required('FIREBASE_WEB_APP_ID', environment),
+    },
+    oauth: {
+      accessTokenTtlSeconds: parseSeconds('MCP_ACCESS_TOKEN_TTL_SECONDS', environment.MCP_ACCESS_TOKEN_TTL_SECONDS, 900, 60, 3600),
+      refreshTokenTtlSeconds: parseSeconds(
+        'MCP_REFRESH_TOKEN_TTL_SECONDS',
+        environment.MCP_REFRESH_TOKEN_TTL_SECONDS,
+        60 * 60 * 24 * 30,
+        60 * 60,
+        60 * 60 * 24 * 90
+      ),
+      sessionTtlSeconds: parseSeconds(
+        'MCP_SESSION_TTL_SECONDS',
+        environment.MCP_SESSION_TTL_SECONDS,
+        60 * 60 * 24 * 7,
+        60 * 60,
+        60 * 60 * 24 * 14
+      ),
+    },
     untappd: {
       clientId: required('UNTAPPD_CLIENT_ID', environment),
       clientSecret: required('UNTAPPD_CLIENT_SECRET', environment),
