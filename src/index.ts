@@ -372,10 +372,16 @@ async function handleMcp(request: IncomingMessage, response: ServerResponse): Pr
 }
 
 const httpServer = createServer(async (request, response) => {
-  if (!validateHost(request, response) || !validateOrigin(request, response)) {
+  if (!validateHost(request, response)) {
     return;
   }
   const url = requestUrl(request);
+  // OAuth browser navigation and form posts may legitimately omit Origin. The
+  // MCP transport is the only cross-origin endpoint, so apply its strict
+  // Origin policy there rather than to the OAuth authorization flow.
+  if (url.pathname === '/mcp' && !validateOrigin(request, response)) {
+    return;
+  }
   try {
     if (request.method === 'GET' && (url.pathname === '/health' || url.pathname === '/healthz')) {
       writeJson(response, 200, { status: 'ok' });
