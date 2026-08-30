@@ -377,7 +377,7 @@ const httpServer = createServer(async (request, response) => {
   }
   const url = requestUrl(request);
   try {
-    if (request.method === 'GET' && url.pathname === '/healthz') {
+    if (request.method === 'GET' && (url.pathname === '/health' || url.pathname === '/healthz')) {
       writeJson(response, 200, { status: 'ok' });
       return;
     }

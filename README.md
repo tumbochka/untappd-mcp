@@ -35,6 +35,7 @@ Unauthenticated MCP requests receive `401` with protected-resource metadata. A c
 | Endpoint | Purpose |
 | --- | --- |
 | `POST /mcp` | Streamable HTTP MCP; accepts only MCP OAuth bearer tokens. |
+| `GET /health` | Unauthenticated liveness endpoint. |
 | `GET /.well-known/oauth-protected-resource` | Protected-resource metadata. The `/mcp` suffix variant is also served. |
 | `GET /.well-known/oauth-authorization-server` | OAuth authorization-server metadata. |
 | `POST /oauth/register` | Dynamic Client Registration for public clients. |
