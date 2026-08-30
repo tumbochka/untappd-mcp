@@ -69,7 +69,7 @@ function writeHtml(response: ServerResponse, status: number, html: string, pageN
     'content-security-policy': [
       "default-src 'none'",
       `style-src 'nonce-${pageNonce}'`,
-      `script-src 'nonce-${pageNonce}' https://www.gstatic.com`,
+      `script-src 'nonce-${pageNonce}' https://www.gstatic.com https://apis.google.com`,
       "connect-src 'self' https://identitytoolkit.googleapis.com https://securetoken.googleapis.com https://www.googleapis.com",
       'frame-src https://accounts.google.com https://*.firebaseapp.com',
       "base-uri 'none'",
