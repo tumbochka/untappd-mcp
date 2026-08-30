@@ -233,7 +233,9 @@ export class McpOAuthService {
       throw new OAuthProtocolError('invalid_request', 'PKCE S256 is required');
     }
     const clientId = required(parameters.get('client_id'), 'client_id');
-    const client = (await this.store.getClient(clientId)) ?? (await this.resolveClientMetadata(clientId));
+    const client = clientId === claudeClientMetadataUrl
+      ? await this.resolveClientMetadata(clientId)
+      : await this.store.getClient(clientId);
     if (!client) {
       throw new OAuthProtocolError('unauthorized_client', 'Unknown client_id');
     }
