@@ -13,6 +13,8 @@ export const MCP_SCOPES = ['untappd:read', 'untappd:write'] as const;
 export type McpScope = (typeof MCP_SCOPES)[number];
 
 const supportedScopes = new Set<string>(MCP_SCOPES);
+const claudeClientMetadataUrl = 'https://claude.ai/oauth/mcp-oauth-client-metadata';
+const claudeCallbackUrl = 'https://claude.ai/api/mcp/auth_callback';
 
 export class OAuthProtocolError extends Error {
   constructor(
@@ -110,6 +112,60 @@ function asMcpScopes(scopes: string[]): McpScope[] {
   return scopes as McpScope[];
 }
 
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every(item => typeof item === 'string');
+}
+
+async function resolveClaudeClientMetadata(clientId: string): Promise<OAuthClient | null> {
+  if (clientId !== claudeClientMetadataUrl) {
+    return null;
+  }
+
+  let response: Response;
+  try {
+    response = await fetch(claudeClientMetadataUrl, {
+      headers: { accept: 'application/json' },
+      redirect: 'error',
+      signal: AbortSignal.timeout(5_000),
+    });
+  } catch {
+    throw new OAuthProtocolError('temporarily_unavailable', 'Could not retrieve Claude client metadata', 503);
+  }
+  if (!response.ok || !response.headers.get('content-type')?.includes('application/json')) {
+    throw new OAuthProtocolError('temporarily_unavailable', 'Claude client metadata is unavailable', 503);
+  }
+
+  let metadata: unknown;
+  try {
+    metadata = await response.json();
+  } catch {
+    throw new OAuthProtocolError('invalid_client_metadata', 'Claude client metadata is malformed');
+  }
+  if (!metadata || typeof metadata !== 'object') {
+    throw new OAuthProtocolError('invalid_client_metadata', 'Claude client metadata is malformed');
+  }
+  const data = metadata as Record<string, unknown>;
+  if (
+    data.client_id !== claudeClientMetadataUrl ||
+    !isStringArray(data.redirect_uris) ||
+    !data.redirect_uris.includes(claudeCallbackUrl) ||
+    !isStringArray(data.grant_types) ||
+    !data.grant_types.includes('authorization_code') ||
+    !isStringArray(data.response_types) ||
+    !data.response_types.includes('code') ||
+    data.token_endpoint_auth_method !== 'none'
+  ) {
+    throw new OAuthProtocolError('invalid_client_metadata', 'Claude client metadata is not compatible with this server');
+  }
+
+  return {
+    clientId,
+    clientName: typeof data.client_name === 'string' && data.client_name.trim() ? data.client_name.trim().slice(0, 120) : 'Claude',
+    redirectUris: [claudeCallbackUrl],
+    createdAt: nowSeconds(),
+  };
+}
+
 function verifyResource(value: string, expected: string): void {
   let normalized: string;
   try {
@@ -134,7 +190,8 @@ export class McpOAuthService {
     private readonly store: OAuthStore,
     publicBaseUrl: URL,
     private readonly accessTokenTtlSeconds: number,
-    private readonly refreshTokenTtlSeconds: number
+    private readonly refreshTokenTtlSeconds: number,
+    private readonly resolveClientMetadata: (clientId: string) => Promise<OAuthClient | null> = resolveClaudeClientMetadata
   ) {
     this.resource = new URL('/mcp', publicBaseUrl).toString();
     this.issuer = publicBaseUrl.origin;
@@ -176,7 +233,7 @@ export class McpOAuthService {
       throw new OAuthProtocolError('invalid_request', 'PKCE S256 is required');
     }
     const clientId = required(parameters.get('client_id'), 'client_id');
-    const client = await this.store.getClient(clientId);
+    const client = (await this.store.getClient(clientId)) ?? (await this.resolveClientMetadata(clientId));
     if (!client) {
       throw new OAuthProtocolError('unauthorized_client', 'Unknown client_id');
     }

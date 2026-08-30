@@ -7,7 +7,7 @@ A multi-user [Model Context Protocol](https://modelcontextprotocol.io/) server f
 - Streamable HTTP endpoint: `POST /mcp`
 - OAuth 2.1 authorization-code flow with mandatory PKCE S256
 - OAuth protected-resource and authorization-server metadata
-- OAuth 2.0 Dynamic Client Registration for public MCP clients
+- Claude Client ID Metadata Document (CIMD) support, plus OAuth 2.0 Dynamic Client Registration fallback
 - Short-lived, audience-bound opaque access tokens and rotating refresh tokens
 - Firebase Auth Google sign-in and a secure server-side browser session
 - `search_beers` and `get_beer`
@@ -30,7 +30,7 @@ Firebase browser sign-in ──> MCP OAuth server ── MCP access token ──
 
 Firebase Auth identifies the person in the browser and creates a secure HTTP-only session. The MCP authorization server then issues its own access token whose owner is that Firebase `uid`, whose audience is exactly this server’s `/mcp` URL, and whose scopes are `untappd:read` and `untappd:write`.
 
-Unauthenticated MCP requests receive `401` with protected-resource metadata. A compatible client such as Claude discovers the authorization server, registers a public OAuth client if necessary, sends the user through Firebase sign-in and the consent screen, then exchanges a PKCE-protected code for MCP tokens.
+Unauthenticated MCP requests receive `401` with protected-resource metadata. A compatible client such as Claude discovers the authorization server, resolves its hosted client metadata (or registers a public OAuth client when needed), sends the user through Firebase sign-in and the consent screen, then exchanges a PKCE-protected code for MCP tokens.
 
 | Endpoint | Purpose |
 | --- | --- |
@@ -82,7 +82,7 @@ The included `Dockerfile` is suitable for Cloud Run. Configure these values thro
 - `UNTAPPD_TOKEN_ENCRYPTION_KEY`
 - `CONNECT_STATE_SECRET`
 
-Grant the Cloud Run service account only the Firestore permissions needed for `untappd_credentials`. Keep Firebase service-account credentials and Untappd credentials out of the image and repository.
+Grant the Cloud Run service account Firestore access for `untappd_credentials`, Secret Manager access for the three runtime secrets, and only `firebaseauth.users.createSession` plus `firebaseauth.users.get` for secure Firebase session handling. Keep Firebase service-account credentials and Untappd credentials out of the image and repository.
 
 Set these non-secret runtime variables:
 

@@ -184,3 +184,36 @@ test('OAuth grant refuses a code with the wrong PKCE verifier', async () => {
     (error: unknown) => error instanceof OAuthProtocolError && error.error === 'invalid_grant'
   );
 });
+
+test('OAuth accepts the validated Claude client metadata document', async () => {
+  const store = new MemoryOAuthStore();
+  const claudeClientId = 'https://claude.ai/oauth/mcp-oauth-client-metadata';
+  const claudeClient: OAuthClient = {
+    clientId: claudeClientId,
+    clientName: 'Claude',
+    redirectUris: ['https://claude.ai/api/mcp/auth_callback'],
+    createdAt: 0,
+  };
+  const oauth = new McpOAuthService(
+    store,
+    new URL('https://untappd-mcp.example.com'),
+    900,
+    3600,
+    async clientId => (clientId === claudeClientId ? claudeClient : null)
+  );
+  const verifier = 'd'.repeat(64);
+  const request = await oauth.validateAuthorizationRequest(
+    new URLSearchParams({
+      response_type: 'code',
+      client_id: claudeClientId,
+      redirect_uri: 'https://claude.ai/api/mcp/auth_callback',
+      resource: oauth.resource,
+      scope: 'untappd:read',
+      code_challenge: pkceChallenge(verifier),
+      code_challenge_method: 'S256',
+    })
+  );
+
+  assert.equal(request.client.clientId, claudeClientId);
+  assert.equal(request.redirectUri, 'https://claude.ai/api/mcp/auth_callback');
+});
