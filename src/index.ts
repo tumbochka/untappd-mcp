@@ -181,6 +181,7 @@ function authorizationServerMetadata(): Record<string, unknown> {
     grant_types_supported: ['authorization_code', 'refresh_token'],
     token_endpoint_auth_methods_supported: ['none'],
     code_challenge_methods_supported: ['S256'],
+    authorization_response_iss_parameter_supported: true,
     scopes_supported: MCP_SCOPES,
   };
 }
@@ -278,6 +279,7 @@ async function handleConsent(request: IncomingMessage, response: ServerResponse)
         error: 'access_denied',
         error_description: 'The resource owner denied access',
         state: denied.state,
+        iss: oauth.issuer,
       })
     );
     return;
@@ -286,7 +288,10 @@ async function handleConsent(request: IncomingMessage, response: ServerResponse)
     throw new OAuthProtocolError('invalid_request', 'Invalid authorization decision');
   }
   const approved = await oauth.approveAuthorizationTransaction(transactionId, session.uid);
-  writeRedirect(response, appendParameters(approved.redirectUri, { code: approved.code, state: approved.state }));
+  writeRedirect(
+    response,
+    appendParameters(approved.redirectUri, { code: approved.code, state: approved.state, iss: oauth.issuer })
+  );
 }
 
 async function handleToken(request: IncomingMessage, response: ServerResponse): Promise<void> {
