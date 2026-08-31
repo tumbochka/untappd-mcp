@@ -88,7 +88,13 @@ function nonce(): string {
   return randomBytes(16).toString('base64');
 }
 
-function writeHtml(response: ServerResponse, status: number, html: string, pageNonce: string): void {
+function writeHtml(
+  response: ServerResponse,
+  status: number,
+  html: string,
+  pageNonce: string,
+  formActionExtra: string[] = []
+): void {
   response.writeHead(status, {
     'content-type': 'text/html; charset=utf-8',
     'cache-control': 'no-store',
@@ -100,7 +106,7 @@ function writeHtml(response: ServerResponse, status: number, html: string, pageN
       "connect-src 'self' https://identitytoolkit.googleapis.com https://securetoken.googleapis.com https://www.googleapis.com",
       'frame-src https://accounts.google.com https://*.firebaseapp.com',
       "base-uri 'none'",
-      "form-action 'self'",
+      ["form-action 'self'", ...formActionExtra].join(' '),
     ].join('; '),
   });
   response.end(html);
@@ -262,6 +268,7 @@ function authorizationServerMetadata(): Record<string, unknown> {
     grant_types_supported: ['authorization_code', 'refresh_token'],
     token_endpoint_auth_methods_supported: ['none', 'private_key_jwt'],
     code_challenge_methods_supported: ['S256'],
+    authorization_response_iss_parameter_supported: true,
     scopes_supported: MCP_SCOPES,
   };
 }
@@ -354,7 +361,11 @@ async function handleAuthorize(request: IncomingMessage, response: ServerRespons
       transactionId: transaction.id,
       nonce: pageNonce,
     }),
-    pageNonce
+    pageNonce,
+    // Approving the consent form issues a 302 to the client's validated
+    // redirect_uri. Browsers enforce form-action across that redirect, so the
+    // client origin must be allowed or the authorization code never leaves here.
+    [new URL(authorizationRequest.redirectUri).origin]
   );
 }
 
@@ -377,6 +388,7 @@ async function handleConsent(request: IncomingMessage, response: ServerResponse)
         error: 'access_denied',
         error_description: 'The resource owner denied access',
         state: denied.state,
+        iss: oauth.issuer,
       })
     );
     return;
@@ -387,7 +399,7 @@ async function handleConsent(request: IncomingMessage, response: ServerResponse)
   const approved = await oauth.approveAuthorizationTransaction(transactionId, session.uid);
   writeRedirect(
     response,
-    appendParameters(approved.redirectUri, { code: approved.code, state: approved.state })
+    appendParameters(approved.redirectUri, { code: approved.code, state: approved.state, iss: oauth.issuer })
   );
 }
 
@@ -596,7 +608,11 @@ const httpServer = createServer(async (request, response) => {
       writeJson(response, 200, metadata);
       return;
     }
-    if (request.method === 'GET' && url.pathname === '/.well-known/oauth-authorization-server') {
+    if (
+      request.method === 'GET' &&
+      (url.pathname === '/.well-known/oauth-authorization-server' ||
+        url.pathname === '/.well-known/oauth-authorization-server/mcp')
+    ) {
       writeJson(response, 200, authorizationServerMetadata());
       return;
     }
