@@ -289,6 +289,62 @@ test('OAuth accepts a callback-specific ChatGPT CIMD client', async () => {
   assert.equal(request.redirectUri, callbackUrl);
 });
 
+test('OAuth validates a ChatGPT private_key_jwt assertion before exchanging a code', async () => {
+  const store = new MemoryOAuthStore();
+  const chatGptClientId = 'https://chatgpt.com/oauth/callback_456/client.json';
+  const callbackUrl = 'https://chatgpt.com/connector/oauth/callback_456';
+  const chatGptClient: OAuthClient = {
+    clientId: chatGptClientId,
+    clientName: 'ChatGPT',
+    redirectUris: [callbackUrl],
+    createdAt: 0,
+  };
+  let assertionVerified = false;
+  const oauth = new McpOAuthService(
+    store,
+    new URL('https://untappd-mcp.example.com'),
+    900,
+    3600,
+    async clientId => (clientId === chatGptClientId ? chatGptClient : null),
+    async (clientId, assertion, tokenEndpoint, issuer) => {
+      assertionVerified = true;
+      assert.equal(clientId, chatGptClientId);
+      assert.equal(assertion, 'signed-client-assertion');
+      assert.equal(tokenEndpoint, 'https://untappd-mcp.example.com/oauth/token');
+      assert.equal(issuer, 'https://untappd-mcp.example.com');
+    }
+  );
+  const verifier = 'h'.repeat(64);
+  const request = await oauth.validateAuthorizationRequest(
+    new URLSearchParams({
+      response_type: 'code',
+      client_id: chatGptClientId,
+      redirect_uri: callbackUrl,
+      resource: oauth.resource,
+      scope: 'untappd:read',
+      code_challenge: pkceChallenge(verifier),
+      code_challenge_method: 'S256',
+    })
+  );
+  const transaction = await oauth.createAuthorizationTransaction(request, 'firebase-user-123');
+  const approved = await oauth.approveAuthorizationTransaction(transaction.id, 'firebase-user-123');
+
+  await oauth.exchangeAuthorizationCode(
+    new URLSearchParams({
+      grant_type: 'authorization_code',
+      client_id: chatGptClientId,
+      client_assertion_type: 'urn:ietf:params:oauth:client-assertion-type:jwt-bearer',
+      client_assertion: 'signed-client-assertion',
+      code: approved.code,
+      redirect_uri: callbackUrl,
+      resource: oauth.resource,
+      code_verifier: verifier,
+    })
+  );
+
+  assert.equal(assertionVerified, true);
+});
+
 test('OAuth accepts the pre-registered public Claude client', async () => {
   const oauth = new McpOAuthService(new MemoryOAuthStore(), new URL('https://untappd-mcp.example.com'), 900, 3600);
   const request = await oauth.validateAuthorizationRequest(

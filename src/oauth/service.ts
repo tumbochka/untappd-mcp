@@ -1,4 +1,5 @@
 import { createHash, timingSafeEqual } from 'node:crypto';
+import { createRemoteJWKSet, jwtVerify } from 'jose';
 import {
   hashOAuthValue,
   randomOAuthValue,
@@ -17,6 +18,9 @@ const claudeClientMetadataUrl = 'https://claude.ai/oauth/mcp-oauth-client-metada
 const claudeCallbackUrl = 'https://claude.ai/api/mcp/auth_callback';
 const chatGptClientMetadataUrl = 'https://chatgpt.com/oauth/client.json';
 const chatGptCallbackUrl = 'https://chatgpt.com/connector_platform_oauth_redirect';
+const chatGptJwksUrl = 'https://chatgpt.com/oauth/jwks.json';
+const clientAssertionType = 'urn:ietf:params:oauth:client-assertion-type:jwt-bearer';
+const chatGptJwks = createRemoteJWKSet(new URL(chatGptJwksUrl));
 export const CLAUDE_PRE_REGISTERED_CLIENT_ID = 'untappd-mcp-claude';
 
 const claudePreRegisteredClient: OAuthClient = {
@@ -183,6 +187,32 @@ function trustedClientMetadataFor(clientId: string): TrustedClientMetadata | nul
   return trustedClientMetadata.get(clientId) ?? chatGptCallbackSpecificMetadata(clientId);
 }
 
+function isChatGptCimdClient(clientId: string): boolean {
+  return clientId === chatGptClientMetadataUrl || chatGptCallbackSpecificMetadata(clientId) !== null;
+}
+
+async function verifyChatGptClientAssertion(
+  clientId: string,
+  clientAssertion: string,
+  tokenEndpoint: string,
+  issuer: string
+): Promise<void> {
+  if (!isChatGptCimdClient(clientId)) {
+    throw new OAuthProtocolError('invalid_client', 'This client cannot use private_key_jwt', 401);
+  }
+  try {
+    await jwtVerify(clientAssertion, chatGptJwks, {
+      algorithms: ['RS256'],
+      audience: [tokenEndpoint, issuer],
+      issuer: clientId,
+      subject: clientId,
+      requiredClaims: ['iss', 'sub', 'aud', 'exp', 'jti'],
+    });
+  } catch {
+    throw new OAuthProtocolError('invalid_client', 'Client assertion is invalid', 401);
+  }
+}
+
 async function resolveTrustedClientMetadata(clientId: string): Promise<OAuthClient | null> {
   const expected = trustedClientMetadataFor(clientId);
   if (!expected) {
@@ -267,7 +297,13 @@ export class McpOAuthService {
     publicBaseUrl: URL,
     private readonly accessTokenTtlSeconds: number,
     private readonly refreshTokenTtlSeconds: number,
-    private readonly resolveClientMetadata: (clientId: string) => Promise<OAuthClient | null> = resolveTrustedClientMetadata
+    private readonly resolveClientMetadata: (clientId: string) => Promise<OAuthClient | null> = resolveTrustedClientMetadata,
+    private readonly verifyClientAssertion: (
+      clientId: string,
+      clientAssertion: string,
+      tokenEndpoint: string,
+      issuer: string
+    ) => Promise<void> = verifyChatGptClientAssertion
   ) {
     this.resource = new URL('/mcp', publicBaseUrl).toString();
     this.issuer = publicBaseUrl.origin;
@@ -392,6 +428,7 @@ export class McpOAuthService {
 
   async exchangeAuthorizationCode(parameters: URLSearchParams): Promise<TokenResponse> {
     const clientId = required(parameters.get('client_id'), 'client_id');
+    await this.validateTokenEndpointClient(parameters, clientId);
     const redirectUri = parseRedirectUri(required(parameters.get('redirect_uri'), 'redirect_uri'));
     const resource = required(parameters.get('resource'), 'resource');
     verifyResource(resource, this.resource);
@@ -408,6 +445,21 @@ export class McpOAuthService {
       throw new OAuthProtocolError('invalid_grant', 'Authorization code is invalid, expired, or already used');
     }
     return this.issueTokens(stored, randomOAuthValue('family_'));
+  }
+
+  private async validateTokenEndpointClient(parameters: URLSearchParams, clientId: string): Promise<void> {
+    const assertion = parameters.get('client_assertion');
+    const assertionType = parameters.get('client_assertion_type');
+    if (!assertion) {
+      if (assertionType) {
+        throw new OAuthProtocolError('invalid_client', 'client_assertion is required when its type is supplied', 401);
+      }
+      return;
+    }
+    if (assertionType !== clientAssertionType) {
+      throw new OAuthProtocolError('invalid_client', 'Unsupported client assertion type', 401);
+    }
+    await this.verifyClientAssertion(clientId, assertion, `${this.issuer}/oauth/token`, this.issuer);
   }
 
   async refresh(parameters: URLSearchParams): Promise<TokenResponse> {
