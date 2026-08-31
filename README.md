@@ -117,7 +117,7 @@ FIREBASE_WEB_APP_ID=...
 UNTAPPD_CLIENT_ID=...
 UNTAPPD_REDIRECT_URI=https://YOUR_CLOUD_RUN_OR_CUSTOM_DOMAIN/connect/untappd/callback
 UNTAPPD_USER_AGENT=untappd-mcp/0.1 (support@example.com)
-MCP_ALLOWED_ORIGINS=https://claude.ai
+MCP_ALLOWED_ORIGINS=https://claude.ai,https://chatgpt.com
 MCP_PERSONAL_ACCESS_TOKEN_TTL_SECONDS=15552000
 ```
 
