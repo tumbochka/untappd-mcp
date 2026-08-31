@@ -11,6 +11,17 @@ type UntappdMcpDependencies = {
   untappd: UntappdClient;
 };
 
+const untappdUsername = z
+  .string()
+  .min(1)
+  .max(51)
+  .regex(/^@?[A-Za-z0-9_.-]{1,50}$/, 'Enter a valid Untappd username, e.g. "esodin".')
+  .describe('Untappd username of the person to look up (not their display name).');
+
+function normalizeUsername(value: string): string {
+  return value.replace(/^@/, '');
+}
+
 function jsonResult(data: unknown) {
   return {
     content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }],
@@ -189,6 +200,148 @@ export function createUntappdMcpServer(dependencies: UntappdMcpDependencies): Mc
         return beers === null
           ? untappdNotConnected(dependencies)
           : jsonResult(beers);
+      } catch (error) {
+        return handleUntappdError(error);
+      }
+    }
+  );
+
+  const callerAccessToken = async (): Promise<string | undefined> => {
+    if (!dependencies.firebaseUid) {
+      return undefined;
+    }
+    const credential = await dependencies.credentialStore.get(dependencies.firebaseUid);
+    return credential?.accessToken;
+  };
+
+  server.registerTool(
+    'get_user_profile',
+    {
+      title: 'Get an Untappd user profile',
+      description:
+        'Get the public Untappd profile and stats (total beers, check-ins, badges) for any username.',
+      inputSchema: z.object({ username: untappdUsername }),
+      annotations: { readOnlyHint: true },
+    },
+    async ({ username }) => {
+      if (!hasScope(dependencies, 'untappd:read')) {
+        return scopeError('untappd:read');
+      }
+      try {
+        return jsonResult(
+          await dependencies.untappd.getUserInfo(normalizeUsername(username), await callerAccessToken())
+        );
+      } catch (error) {
+        return handleUntappdError(error);
+      }
+    }
+  );
+
+  server.registerTool(
+    'get_user_beers',
+    {
+      title: 'Get another user’s distinct beers',
+      description:
+        'List the distinct beers a given Untappd user has checked in, newest first by default. Paginate with offset. Optionally restrict to a date range (YYYY-MM-DD).',
+      inputSchema: z.object({
+        username: untappdUsername,
+        limit: z.number().int().min(1).max(50).default(25),
+        offset: z.number().int().min(0).default(0),
+        sort: z
+          .enum(['date', 'checkin', 'highest_rated', 'lowest_rated', 'highest_rated_you', 'lowest_rated_you'])
+          .default('date'),
+        startDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional().describe('YYYY-MM-DD; use together with endDate.'),
+        endDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional().describe('YYYY-MM-DD; use together with startDate.'),
+      }),
+      annotations: { readOnlyHint: true },
+    },
+    async ({ username, limit, offset, sort, startDate, endDate }) => {
+      if (!hasScope(dependencies, 'untappd:read')) {
+        return scopeError('untappd:read');
+      }
+      try {
+        return jsonResult(
+          await dependencies.untappd.getUserBeers(
+            normalizeUsername(username),
+            { limit, offset, sort, startDate, endDate },
+            await callerAccessToken()
+          )
+        );
+      } catch (error) {
+        return handleUntappdError(error);
+      }
+    }
+  );
+
+  server.registerTool(
+    'get_user_checkins',
+    {
+      title: 'Get another user’s recent check-ins',
+      description:
+        'Return a given Untappd user’s recent check-in activity feed. Page backwards with maxId (the last checkin_id seen).',
+      inputSchema: z.object({
+        username: untappdUsername,
+        limit: z.number().int().min(1).max(25).default(25),
+        maxId: z.number().int().positive().optional().describe('Return check-ins older than this checkin_id.'),
+        minId: z.number().int().positive().optional().describe('Return check-ins newer than this checkin_id.'),
+      }),
+      annotations: { readOnlyHint: true },
+    },
+    async ({ username, limit, maxId, minId }) => {
+      if (!hasScope(dependencies, 'untappd:read')) {
+        return scopeError('untappd:read');
+      }
+      try {
+        return jsonResult(
+          await dependencies.untappd.getUserCheckins(
+            normalizeUsername(username),
+            { limit, maxId, minId },
+            await callerAccessToken()
+          )
+        );
+      } catch (error) {
+        return handleUntappdError(error);
+      }
+    }
+  );
+
+  server.registerTool(
+    'check_user_had_beer',
+    {
+      title: 'Check whether a user has had a beer',
+      description:
+        'Answer "has USERNAME ever checked in this beer?" for a specific beer ID (get the ID from search_beers). ' +
+        'Returns their rating, how many times, and first/last dates when found. Untappd has no direct lookup, so this ' +
+        'pages through the user’s distinct beers: if found is false and exhausted is false the answer is inconclusive — ' +
+        'raise maxRequests or narrow with a date range. Locked profiles that are not your Untappd friend return locked: true.',
+      inputSchema: z.object({
+        username: untappdUsername,
+        beerId: z.number().int().positive().describe('Untappd beer ID from search_beers or get_beer.'),
+        maxRequests: z
+          .number()
+          .int()
+          .min(1)
+          .max(40)
+          .default(12)
+          .describe('Max Untappd API calls to spend paging (50 distinct beers each). Higher = more thorough, more quota.'),
+        startDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional().describe('YYYY-MM-DD; only scan check-ins in this window (with endDate).'),
+        endDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional().describe('YYYY-MM-DD; only scan check-ins in this window (with startDate).'),
+      }),
+      annotations: { readOnlyHint: true },
+    },
+    async ({ username, beerId, maxRequests, startDate, endDate }) => {
+      if (!hasScope(dependencies, 'untappd:read')) {
+        return scopeError('untappd:read');
+      }
+      try {
+        return jsonResult(
+          await dependencies.untappd.findUserBeer(normalizeUsername(username), beerId, {
+            accessToken: await callerAccessToken(),
+            maxRequests,
+            startDate,
+            endDate,
+          })
+        );
       } catch (error) {
         return handleUntappdError(error);
       }
