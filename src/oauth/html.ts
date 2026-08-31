@@ -123,6 +123,8 @@ export function personalAccessTokenPage(input: {
     expiresAt: number;
     revokedAt?: number;
   }>;
+  createCsrfToken: string;
+  revokeCsrfToken: string;
   nonce: string;
 }): string {
   const tokens = input.tokens.length
@@ -135,7 +137,7 @@ export function personalAccessTokenPage(input: {
               : `Active until ${escapeHtml(new Date(token.expiresAt * 1000).toISOString())}`;
           const revoke = token.revokedAt || token.expiresAt <= Date.now() / 1000
             ? ''
-            : `<form action="/tokens/revoke" method="post"><input type="hidden" name="token_id" value="${escapeHtml(token.id)}"><button class="danger" type="submit">Revoke</button></form>`;
+            : `<form action="/tokens/revoke" method="post"><input type="hidden" name="token_id" value="${escapeHtml(token.id)}"><input type="hidden" name="csrf_token" value="${escapeHtml(input.revokeCsrfToken)}"><button class="danger" type="submit">Revoke</button></form>`;
           return `<li><strong>${escapeHtml(token.label)}</strong><br><span class="muted">Created ${escapeHtml(
             new Date(token.createdAt * 1000).toISOString()
           )} · ${status}</span>${revoke}</li>`;
@@ -145,7 +147,7 @@ export function personalAccessTokenPage(input: {
   const body = `<main class="card">
   <h1>Personal access tokens</h1>
   <p>Create a token to connect Claude without its OAuth callback. A token acts as your MCP identity and can read and create Untappd check-ins, so keep it private.</p>
-  <form action="/tokens" method="post"><button class="primary" type="submit">Create token for Claude</button></form>
+  <form action="/tokens" method="post"><input type="hidden" name="csrf_token" value="${escapeHtml(input.createCsrfToken)}"><button class="primary" type="submit">Create token for Claude</button></form>
   <h2>Existing tokens</h2>
   ${tokens}
 </main>`;

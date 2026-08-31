@@ -5,6 +5,7 @@ import { hostHeaderValidation, originValidation, toNodeHandler } from '@modelcon
 import { createMcpHandler, type AuthInfo } from '@modelcontextprotocol/server';
 import { ConnectStateSigner } from './auth/connectState.js';
 import { FirebaseIdentityVerifier, type FirebaseSession } from './auth/firebaseIdentity.js';
+import { FormTokenSigner } from './auth/formToken.js';
 import { FirestorePersonalAccessTokenStore, PersonalAccessTokenService } from './auth/personalAccessToken.js';
 import { loadConfig } from './config.js';
 import { FirestoreCredentialStore } from './credentials/credentialStore.js';
@@ -29,6 +30,7 @@ const firebaseIdentity = new FirebaseIdentityVerifier(config.firebaseProjectId);
 const credentialStore = new FirestoreCredentialStore(new TokenCipher(config.tokenEncryptionKey));
 const untappd = new UntappdClient(config.untappd);
 const stateSigner = new ConnectStateSigner(config.connectStateSecret);
+const formTokenSigner = new FormTokenSigner(config.connectStateSecret);
 const oauth = new McpOAuthService(
   new FirestoreOAuthStore(),
   config.publicBaseUrl,
@@ -178,12 +180,6 @@ function asMcpAuthInfo(principal: Awaited<ReturnType<typeof oauth.authenticate>>
 function bearerToken(authorizationHeader: string | undefined): string | null {
   const [scheme, token] = authorizationHeader?.split(/\s+/, 2) ?? [];
   return scheme === 'Bearer' && token ? token : null;
-}
-
-function requireSameOriginForm(request: IncomingMessage): void {
-  if (request.headers.origin !== config.publicBaseUrl.origin) {
-    throw new OAuthProtocolError('invalid_request', 'This form must be submitted from Untappd MCP.');
-  }
 }
 
 function resourceMetadata(): Record<string, unknown> {
@@ -394,19 +390,28 @@ async function handlePersonalAccessTokensPage(request: IncomingMessage, response
   writeHtml(
     response,
     200,
-    personalAccessTokenPage({ tokens: await personalAccessTokens.list(session.uid), nonce: pageNonce }),
+    personalAccessTokenPage({
+      tokens: await personalAccessTokens.list(session.uid),
+      createCsrfToken: formTokenSigner.sign(session.uid, 'create', Math.floor(Date.now() / 1000) + 10 * 60),
+      revokeCsrfToken: formTokenSigner.sign(session.uid, 'revoke', Math.floor(Date.now() / 1000) + 10 * 60),
+      nonce: pageNonce,
+    }),
     pageNonce
   );
 }
 
 async function handlePersonalAccessTokenCreate(request: IncomingMessage, response: ServerResponse): Promise<void> {
-  requireSameOriginForm(request);
   const session = await firebaseSession(request);
   if (!session) {
     writeJson(response, 401, { error: 'login_required', message: 'Sign in again before creating a token.' });
     return;
   }
-  await readForm(request);
+  const form = await readForm(request);
+  try {
+    formTokenSigner.verify(form.get('csrf_token'), session.uid, 'create', Math.floor(Date.now() / 1000));
+  } catch {
+    throw new OAuthProtocolError('invalid_request', 'The token creation form has expired. Reload the page and try again.');
+  }
   const issued = await personalAccessTokens.issue(session.uid);
   const pageNonce = nonce();
   writeHtml(
@@ -418,13 +423,18 @@ async function handlePersonalAccessTokenCreate(request: IncomingMessage, respons
 }
 
 async function handlePersonalAccessTokenRevoke(request: IncomingMessage, response: ServerResponse): Promise<void> {
-  requireSameOriginForm(request);
   const session = await firebaseSession(request);
   if (!session) {
     writeJson(response, 401, { error: 'login_required', message: 'Sign in again before revoking a token.' });
     return;
   }
-  const tokenId = (await readForm(request)).get('token_id');
+  const form = await readForm(request);
+  try {
+    formTokenSigner.verify(form.get('csrf_token'), session.uid, 'revoke', Math.floor(Date.now() / 1000));
+  } catch {
+    throw new OAuthProtocolError('invalid_request', 'The token revocation form has expired. Reload the page and try again.');
+  }
+  const tokenId = form.get('token_id');
   if (!tokenId || !/^[A-Za-z0-9_-]{43}$/.test(tokenId)) {
     throw new OAuthProtocolError('invalid_request', 'Invalid personal access token');
   }
