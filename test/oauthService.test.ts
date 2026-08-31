@@ -256,6 +256,39 @@ test('OAuth accepts the validated ChatGPT client metadata document with public t
   assert.equal(request.redirectUri, 'https://chatgpt.com/connector_platform_oauth_redirect');
 });
 
+test('OAuth accepts a callback-specific ChatGPT CIMD client', async () => {
+  const store = new MemoryOAuthStore();
+  const chatGptClientId = 'https://chatgpt.com/oauth/callback_123/client.json';
+  const callbackUrl = 'https://chatgpt.com/connector/oauth/callback_123';
+  const chatGptClient: OAuthClient = {
+    clientId: chatGptClientId,
+    clientName: 'ChatGPT',
+    redirectUris: [callbackUrl],
+    createdAt: 0,
+  };
+  const oauth = new McpOAuthService(
+    store,
+    new URL('https://untappd-mcp.example.com'),
+    900,
+    3600,
+    async clientId => (clientId === chatGptClientId ? chatGptClient : null)
+  );
+  const request = await oauth.validateAuthorizationRequest(
+    new URLSearchParams({
+      response_type: 'code',
+      client_id: chatGptClientId,
+      redirect_uri: callbackUrl,
+      resource: oauth.resource,
+      scope: 'untappd:read',
+      code_challenge: pkceChallenge('g'.repeat(64)),
+      code_challenge_method: 'S256',
+    })
+  );
+
+  assert.equal(request.client.clientId, chatGptClientId);
+  assert.equal(request.redirectUri, callbackUrl);
+});
+
 test('OAuth accepts the pre-registered public Claude client', async () => {
   const oauth = new McpOAuthService(new MemoryOAuthStore(), new URL('https://untappd-mcp.example.com'), 900, 3600);
   const request = await oauth.validateAuthorizationRequest(

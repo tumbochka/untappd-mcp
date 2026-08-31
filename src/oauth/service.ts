@@ -151,8 +151,40 @@ const trustedClientMetadata = new Map<string, TrustedClientMetadata>([
   ],
 ]);
 
+function chatGptCallbackSpecificMetadata(clientId: string): TrustedClientMetadata | null {
+  let url: URL;
+  try {
+    url = new URL(clientId);
+  } catch {
+    return null;
+  }
+
+  // Without authorization-response issuer identification, ChatGPT uses a
+  // callback-specific CIMD URL and a matching callback URL. Accept only that
+  // exact, HTTPS-only ChatGPT URL shape so client metadata cannot become an
+  // arbitrary outbound fetch target.
+  if (url.origin !== 'https://chatgpt.com' || url.search || url.hash) {
+    return null;
+  }
+  const match = url.pathname.match(/^\/oauth\/([A-Za-z0-9._~-]+)\/client\.json$/);
+  if (!match) {
+    return null;
+  }
+
+  const callbackId = match[1];
+  return {
+    clientId: url.toString(),
+    redirectUri: `https://chatgpt.com/connector/oauth/${callbackId}`,
+    fallbackName: 'ChatGPT',
+  };
+}
+
+function trustedClientMetadataFor(clientId: string): TrustedClientMetadata | null {
+  return trustedClientMetadata.get(clientId) ?? chatGptCallbackSpecificMetadata(clientId);
+}
+
 async function resolveTrustedClientMetadata(clientId: string): Promise<OAuthClient | null> {
-  const expected = trustedClientMetadata.get(clientId);
+  const expected = trustedClientMetadataFor(clientId);
   if (!expected) {
     return null;
   }
