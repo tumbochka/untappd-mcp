@@ -223,6 +223,39 @@ test('OAuth accepts the validated Claude client metadata document', async () => 
   assert.equal(request.redirectUri, 'https://claude.ai/api/mcp/auth_callback');
 });
 
+test('OAuth accepts the validated ChatGPT client metadata document with public token exchange', async () => {
+  const store = new MemoryOAuthStore();
+  const chatGptClientId = 'https://chatgpt.com/oauth/client.json';
+  const chatGptClient: OAuthClient = {
+    clientId: chatGptClientId,
+    clientName: 'ChatGPT',
+    redirectUris: ['https://chatgpt.com/connector_platform_oauth_redirect'],
+    createdAt: 0,
+  };
+  const oauth = new McpOAuthService(
+    store,
+    new URL('https://untappd-mcp.example.com'),
+    900,
+    3600,
+    async clientId => (clientId === chatGptClientId ? chatGptClient : null)
+  );
+  const verifier = 'f'.repeat(64);
+  const request = await oauth.validateAuthorizationRequest(
+    new URLSearchParams({
+      response_type: 'code',
+      client_id: chatGptClientId,
+      redirect_uri: 'https://chatgpt.com/connector_platform_oauth_redirect',
+      resource: oauth.resource,
+      scope: 'untappd:read',
+      code_challenge: pkceChallenge(verifier),
+      code_challenge_method: 'S256',
+    })
+  );
+
+  assert.equal(request.client.clientId, chatGptClientId);
+  assert.equal(request.redirectUri, 'https://chatgpt.com/connector_platform_oauth_redirect');
+});
+
 test('OAuth accepts the pre-registered public Claude client', async () => {
   const oauth = new McpOAuthService(new MemoryOAuthStore(), new URL('https://untappd-mcp.example.com'), 900, 3600);
   const request = await oauth.validateAuthorizationRequest(

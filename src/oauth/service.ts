@@ -15,6 +15,8 @@ export type McpScope = (typeof MCP_SCOPES)[number];
 const supportedScopes = new Set<string>(MCP_SCOPES);
 const claudeClientMetadataUrl = 'https://claude.ai/oauth/mcp-oauth-client-metadata';
 const claudeCallbackUrl = 'https://claude.ai/api/mcp/auth_callback';
+const chatGptClientMetadataUrl = 'https://chatgpt.com/oauth/client.json';
+const chatGptCallbackUrl = 'https://chatgpt.com/connector_platform_oauth_redirect';
 export const CLAUDE_PRE_REGISTERED_CLIENT_ID = 'untappd-mcp-claude';
 
 const claudePreRegisteredClient: OAuthClient = {
@@ -124,52 +126,86 @@ function isStringArray(value: unknown): value is string[] {
   return Array.isArray(value) && value.every(item => typeof item === 'string');
 }
 
-async function resolveClaudeClientMetadata(clientId: string): Promise<OAuthClient | null> {
-  if (clientId !== claudeClientMetadataUrl) {
+type TrustedClientMetadata = {
+  clientId: string;
+  redirectUri: string;
+  fallbackName: string;
+};
+
+const trustedClientMetadata = new Map<string, TrustedClientMetadata>([
+  [
+    claudeClientMetadataUrl,
+    {
+      clientId: claudeClientMetadataUrl,
+      redirectUri: claudeCallbackUrl,
+      fallbackName: 'Claude',
+    },
+  ],
+  [
+    chatGptClientMetadataUrl,
+    {
+      clientId: chatGptClientMetadataUrl,
+      redirectUri: chatGptCallbackUrl,
+      fallbackName: 'ChatGPT',
+    },
+  ],
+]);
+
+async function resolveTrustedClientMetadata(clientId: string): Promise<OAuthClient | null> {
+  const expected = trustedClientMetadata.get(clientId);
+  if (!expected) {
     return null;
   }
 
   let response: Response;
   try {
-    response = await fetch(claudeClientMetadataUrl, {
+    response = await fetch(expected.clientId, {
       headers: { accept: 'application/json' },
       redirect: 'error',
       signal: AbortSignal.timeout(5_000),
     });
   } catch {
-    throw new OAuthProtocolError('temporarily_unavailable', 'Could not retrieve Claude client metadata', 503);
+    throw new OAuthProtocolError('temporarily_unavailable', 'Could not retrieve MCP client metadata', 503);
   }
   if (!response.ok || !response.headers.get('content-type')?.includes('application/json')) {
-    throw new OAuthProtocolError('temporarily_unavailable', 'Claude client metadata is unavailable', 503);
+    throw new OAuthProtocolError('temporarily_unavailable', 'MCP client metadata is unavailable', 503);
   }
 
   let metadata: unknown;
   try {
     metadata = await response.json();
   } catch {
-    throw new OAuthProtocolError('invalid_client_metadata', 'Claude client metadata is malformed');
+    throw new OAuthProtocolError('invalid_client_metadata', 'MCP client metadata is malformed');
   }
   if (!metadata || typeof metadata !== 'object') {
-    throw new OAuthProtocolError('invalid_client_metadata', 'Claude client metadata is malformed');
+    throw new OAuthProtocolError('invalid_client_metadata', 'MCP client metadata is malformed');
   }
   const data = metadata as Record<string, unknown>;
+  const tokenEndpointMethods = isStringArray(data.token_endpoint_auth_methods_supported)
+    ? data.token_endpoint_auth_methods_supported
+    : typeof data.token_endpoint_auth_method === 'string'
+      ? [data.token_endpoint_auth_method]
+      : [];
   if (
-    data.client_id !== claudeClientMetadataUrl ||
+    data.client_id !== expected.clientId ||
     !isStringArray(data.redirect_uris) ||
-    !data.redirect_uris.includes(claudeCallbackUrl) ||
+    !data.redirect_uris.includes(expected.redirectUri) ||
     !isStringArray(data.grant_types) ||
     !data.grant_types.includes('authorization_code') ||
     !isStringArray(data.response_types) ||
     !data.response_types.includes('code') ||
-    data.token_endpoint_auth_method !== 'none'
+    !tokenEndpointMethods.includes('none')
   ) {
-    throw new OAuthProtocolError('invalid_client_metadata', 'Claude client metadata is not compatible with this server');
+    throw new OAuthProtocolError('invalid_client_metadata', 'MCP client metadata is not compatible with this server');
   }
 
   return {
     clientId,
-    clientName: typeof data.client_name === 'string' && data.client_name.trim() ? data.client_name.trim().slice(0, 120) : 'Claude',
-    redirectUris: [claudeCallbackUrl],
+    clientName:
+      typeof data.client_name === 'string' && data.client_name.trim()
+        ? data.client_name.trim().slice(0, 120)
+        : expected.fallbackName,
+    redirectUris: [expected.redirectUri],
     createdAt: nowSeconds(),
   };
 }
@@ -199,7 +235,7 @@ export class McpOAuthService {
     publicBaseUrl: URL,
     private readonly accessTokenTtlSeconds: number,
     private readonly refreshTokenTtlSeconds: number,
-    private readonly resolveClientMetadata: (clientId: string) => Promise<OAuthClient | null> = resolveClaudeClientMetadata
+    private readonly resolveClientMetadata: (clientId: string) => Promise<OAuthClient | null> = resolveTrustedClientMetadata
   ) {
     this.resource = new URL('/mcp', publicBaseUrl).toString();
     this.issuer = publicBaseUrl.origin;
@@ -241,11 +277,12 @@ export class McpOAuthService {
       throw new OAuthProtocolError('invalid_request', 'PKCE S256 is required');
     }
     const clientId = required(parameters.get('client_id'), 'client_id');
-    const client = clientId === claudeClientMetadataUrl
-      ? await this.resolveClientMetadata(clientId)
-      : clientId === CLAUDE_PRE_REGISTERED_CLIENT_ID
+    const metadataClient = await this.resolveClientMetadata(clientId);
+    const client =
+      metadataClient ??
+      (clientId === CLAUDE_PRE_REGISTERED_CLIENT_ID
         ? claudePreRegisteredClient
-        : await this.store.getClient(clientId);
+        : await this.store.getClient(clientId));
     if (!client) {
       throw new OAuthProtocolError('unauthorized_client', 'Unknown client_id');
     }

@@ -7,7 +7,7 @@ A multi-user [Model Context Protocol](https://modelcontextprotocol.io/) server f
 - Streamable HTTP endpoint: `POST /mcp`
 - OAuth 2.1 authorization-code flow with mandatory PKCE S256
 - OAuth protected-resource and authorization-server metadata
-- Claude Client ID Metadata Document (CIMD) support and a pre-registered public Claude client fallback
+- Client ID Metadata Document (CIMD) support for Claude and ChatGPT, plus a pre-registered public Claude client fallback
 - Short-lived, audience-bound opaque access tokens and rotating refresh tokens
 - Firebase Auth Google sign-in and a secure server-side browser session
 - Revocable, time-limited personal access tokens for Claude while its custom-connector OAuth callback is unavailable
