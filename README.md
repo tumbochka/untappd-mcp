@@ -5,6 +5,7 @@ A multi-user [Model Context Protocol](https://modelcontextprotocol.io/) server f
 ## Current capabilities
 
 - Streamable HTTP endpoint: `POST /mcp`
+- Optional Auth0-backed ChatGPT endpoint: `POST /chatgpt/mcp`
 - OAuth 2.1 authorization-code flow with mandatory PKCE S256
 - OAuth protected-resource and authorization-server metadata
 - Client ID Metadata Document (CIMD) support for Claude and ChatGPT, plus a pre-registered public Claude client fallback
@@ -36,6 +37,7 @@ For Claude’s current custom-connector OAuth callback failure, the server also 
 | Endpoint | Purpose |
 | --- | --- |
 | `POST /mcp` | Streamable HTTP MCP; accepts only MCP OAuth bearer tokens. |
+| `POST /chatgpt/mcp` | Separate Auth0-protected MCP endpoint for ChatGPT. It is disabled until `AUTH0_ISSUER` is configured and never changes Claude’s `/mcp` flow. |
 | `GET /health` | Unauthenticated liveness endpoint. |
 | `GET /.well-known/oauth-protected-resource` | Protected-resource metadata. The `/mcp` suffix variant is also served. |
 | `GET /.well-known/oauth-authorization-server` | OAuth authorization-server metadata. |
@@ -48,6 +50,51 @@ For Claude’s current custom-connector OAuth callback failure, the server also 
 | `GET /connect/untappd` | Starts the separate Untappd authorization flow for the signed-in Firebase user. |
 
 The server keeps only hashes of MCP access, authorization-code, and refresh tokens in Firestore. Refresh tokens rotate; a reused refresh token revokes its whole token family. Untappd access tokens use AES-256-GCM encryption before storage.
+
+### Auth0 path for ChatGPT
+
+`/chatgpt/mcp` is intentionally a separate protected resource. It leaves `/mcp`, the custom OAuth server, existing Claude connector settings, and personal access tokens unchanged. When enabled, ChatGPT receives an Auth0 access token for this exact audience:
+
+```text
+https://YOUR_CLOUD_RUN_OR_CUSTOM_DOMAIN/chatgpt/mcp
+```
+
+The server validates the Auth0 JWT against the tenant JWKS, requires that exact audience and issuer, and maps a verified Auth0 email claim to the matching verified Firebase user. Therefore existing encrypted Untappd credentials and the read-only legacy-token migration remain keyed by the same Firebase UID.
+
+#### Configure Auth0
+
+1. Create an Auth0 tenant and a **Regular Web Application** for ChatGPT. Enable the Authorization Code and Refresh Token grant types.
+2. Create an Auth0 **API** with identifier `https://YOUR_CLOUD_RUN_OR_CUSTOM_DOMAIN/chatgpt/mcp`, signing algorithm **RS256**, and these permissions:
+
+   ```text
+   untappd:read
+   untappd:write
+   ```
+
+   Configure the tenant’s Resource Parameter Compatibility Profile so Auth0 accepts the standard OAuth `resource` parameter. ChatGPT sends that parameter instead of Auth0’s proprietary `audience` parameter.
+3. Enable an identity connection with verified email, normally Google. For production Google login, register the Auth0 callback `https://YOUR_AUTH0_DOMAIN/login/callback` in Google Cloud and add its client ID and secret to the Auth0 Google connection.
+4. Add and deploy this **Post Login Action**. Replace `YOUR_CLOUD_RUN_OR_CUSTOM_DOMAIN` exactly; claims must use the same origin as `PUBLIC_BASE_URL`.
+
+   ```js
+   exports.onExecutePostLogin = async (event, api) => {
+     const namespace = 'https://YOUR_CLOUD_RUN_OR_CUSTOM_DOMAIN/auth0';
+     if (event.user.email && event.user.email_verified) {
+       api.accessToken.setCustomClaim(`${namespace}/email`, event.user.email);
+       api.accessToken.setCustomClaim(`${namespace}/email_verified`, true);
+     }
+   };
+   ```
+
+5. Set the non-secret Cloud Run variable:
+
+   ```text
+   AUTH0_ISSUER=https://YOUR_AUTH0_TENANT.REGION.auth0.com/
+   ```
+
+   Keep the trailing slash. No Auth0 client secret is stored by Untappd MCP.
+6. Create a new ChatGPT connector using `https://YOUR_CLOUD_RUN_OR_CUSTOM_DOMAIN/chatgpt/mcp`, choose **OAuth** then **Use your own OAuth client**, and copy the callback URL ChatGPT shows into the Auth0 application’s **Allowed Callback URLs**. Finally paste that Auth0 application’s client ID and client secret into ChatGPT. Select the Auth0-supported client authentication method shown by the application settings.
+
+Auth0 users must sign in with a verified email that belongs to a Firebase user. A new person should first open `/connect/untappd`, sign in with Firebase using that email, and connect Untappd; later Auth0 tokens with the same verified email resolve to that Firebase UID.
 
 ### Legacy degustation-app migration
 
@@ -119,6 +166,8 @@ UNTAPPD_REDIRECT_URI=https://YOUR_CLOUD_RUN_OR_CUSTOM_DOMAIN/connect/untappd/cal
 UNTAPPD_USER_AGENT=untappd-mcp/0.1 (support@example.com)
 MCP_ALLOWED_ORIGINS=https://claude.ai,https://chatgpt.com
 MCP_PERSONAL_ACCESS_TOKEN_TTL_SECONDS=15552000
+# Optional: enables only /chatgpt/mcp, never changes /mcp
+AUTH0_ISSUER=https://YOUR_AUTH0_TENANT.REGION.auth0.com/
 ```
 
 `PUBLIC_BASE_URL` and `UNTAPPD_REDIRECT_URI` must use the exact final HTTPS origin. Add that hostname to **Firebase Console → Authentication → Settings → Authorized domains** before using the OAuth browser login. The browser config fields are Firebase public configuration, not credentials.

@@ -67,4 +67,13 @@ export class FirebaseIdentityVerifier {
       emailVerified: decoded.email_verified === true,
     };
   }
+
+  async firebaseUidByVerifiedEmail(email: string): Promise<string> {
+    const normalized = email.trim().toLowerCase();
+    const user = await this.auth.getUserByEmail(normalized);
+    if (!user.emailVerified || user.email?.trim().toLowerCase() !== normalized) {
+      throw new Error('The Auth0 email does not identify a verified Firebase user');
+    }
+    return user.uid;
+  }
 }

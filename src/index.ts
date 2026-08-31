@@ -3,6 +3,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { URL } from 'node:url';
 import { hostHeaderValidation, originValidation, toNodeHandler } from '@modelcontextprotocol/node';
 import { createMcpHandler, type AuthInfo } from '@modelcontextprotocol/server';
+import { Auth0IdentityVerifier } from './auth/auth0Identity.js';
 import { ConnectStateSigner } from './auth/connectState.js';
 import { FirebaseIdentityVerifier, type FirebaseSession } from './auth/firebaseIdentity.js';
 import { FormTokenSigner } from './auth/formToken.js';
@@ -47,6 +48,10 @@ const oauth = new McpOAuthService(
   config.oauth.accessTokenTtlSeconds,
   config.oauth.refreshTokenTtlSeconds
 );
+const chatGptMcpResource = new URL('/chatgpt/mcp', config.publicBaseUrl).toString();
+const auth0Identity = config.auth0
+  ? new Auth0IdentityVerifier(config.auth0, email => firebaseIdentity.firebaseUidByVerifiedEmail(email))
+  : null;
 const personalAccessTokens = new PersonalAccessTokenService(
   new FirestorePersonalAccessTokenStore(),
   config.oauth.personalAccessTokenTtlSeconds
@@ -176,14 +181,24 @@ async function connectFirebaseUid(request: IncomingMessage): Promise<string | nu
   }
 }
 
-function asMcpAuthInfo(principal: Awaited<ReturnType<typeof oauth.authenticate>>): AuthInfo {
+function asMcpAuthInfo(
+  principal: {
+    firebaseUid: string;
+    clientId: string;
+    scopes: string[];
+    expiresAt: number;
+    accessToken: string;
+  },
+  resource = oauth.resource,
+  authorizationServer = oauth.issuer
+): AuthInfo {
   return {
     token: principal.accessToken,
     clientId: principal.clientId,
     scopes: principal.scopes,
     expiresAt: principal.expiresAt,
-    resource: new URL(oauth.resource),
-    extra: { firebaseUid: principal.firebaseUid, authorizationServer: oauth.issuer },
+    resource: new URL(resource),
+    extra: { firebaseUid: principal.firebaseUid, authorizationServer },
   };
 }
 
@@ -224,6 +239,18 @@ function resourceMetadata(): Record<string, unknown> {
   };
 }
 
+function chatGptResourceMetadata(): Record<string, unknown> | null {
+  if (!config.auth0) {
+    return null;
+  }
+  return {
+    resource: chatGptMcpResource,
+    authorization_servers: [config.auth0.issuer],
+    scopes_supported: MCP_SCOPES,
+    bearer_methods_supported: ['header'],
+  };
+}
+
 function authorizationServerMetadata(): Record<string, unknown> {
   return {
     issuer: oauth.issuer,
@@ -246,6 +273,24 @@ function mcpUnauthorized(response: ServerResponse, message: string): void {
     { error: 'unauthorized', message },
     {
       'www-authenticate': `Bearer resource_metadata="${config.publicBaseUrl.origin}/.well-known/oauth-protected-resource"`,
+    }
+  );
+}
+
+function chatGptMcpUnauthorized(response: ServerResponse, message: string): void {
+  if (!config.auth0) {
+    writeJson(response, 503, {
+      error: 'auth0_not_configured',
+      message: 'The separate ChatGPT OAuth endpoint is not configured yet.',
+    });
+    return;
+  }
+  writeJson(
+    response,
+    401,
+    { error: 'unauthorized', message },
+    {
+      'www-authenticate': `Bearer resource_metadata="${config.publicBaseUrl.origin}/.well-known/oauth-protected-resource/chatgpt/mcp"`,
     }
   );
 }
@@ -496,6 +541,25 @@ async function handleMcp(request: IncomingMessage, response: ServerResponse): Pr
   }
 }
 
+async function handleChatGptMcp(request: IncomingMessage, response: ServerResponse): Promise<void> {
+  if (!auth0Identity || !config.auth0) {
+    chatGptMcpUnauthorized(response, 'ChatGPT OAuth is not configured.');
+    return;
+  }
+  try {
+    const principal = await auth0Identity.verify(request.headers.authorization);
+    (request as AuthenticatedRequest).auth = asMcpAuthInfo(
+      { ...principal, clientId: 'auth0' },
+      chatGptMcpResource,
+      config.auth0.issuer
+    );
+    await nodeMcpHandler(request as AuthenticatedRequest, response);
+  } catch (error) {
+    console.warn('ChatGPT Auth0 MCP authentication failed', error instanceof Error ? error.message : error);
+    chatGptMcpUnauthorized(response, 'A valid Auth0 access token is required.');
+  }
+}
+
 const httpServer = createServer(async (request, response) => {
   if (!validateHost(request, response)) {
     return;
@@ -504,7 +568,7 @@ const httpServer = createServer(async (request, response) => {
   // OAuth browser navigation and form posts may legitimately omit Origin. The
   // MCP transport is the only cross-origin endpoint, so apply its strict
   // Origin policy there rather than to the OAuth authorization flow.
-  if (url.pathname === '/mcp' && !validateOrigin(request, response)) {
+  if (['/mcp', '/chatgpt/mcp'].includes(url.pathname) && !validateOrigin(request, response)) {
     return;
   }
   try {
@@ -518,6 +582,18 @@ const httpServer = createServer(async (request, response) => {
         url.pathname === '/.well-known/oauth-protected-resource/mcp')
     ) {
       writeJson(response, 200, resourceMetadata());
+      return;
+    }
+    if (
+      request.method === 'GET' &&
+      url.pathname === '/.well-known/oauth-protected-resource/chatgpt/mcp'
+    ) {
+      const metadata = chatGptResourceMetadata();
+      if (!metadata) {
+        writeJson(response, 404, { error: 'not_found' });
+        return;
+      }
+      writeJson(response, 200, metadata);
       return;
     }
     if (request.method === 'GET' && url.pathname === '/.well-known/oauth-authorization-server') {
@@ -575,6 +651,10 @@ const httpServer = createServer(async (request, response) => {
     }
     if (url.pathname === '/mcp') {
       await handleMcp(request, response);
+      return;
+    }
+    if (url.pathname === '/chatgpt/mcp') {
+      await handleChatGptMcp(request, response);
       return;
     }
     writeJson(response, 404, { error: 'not_found' });

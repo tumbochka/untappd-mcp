@@ -11,6 +11,12 @@ export type AppConfig = {
     authDomain: string;
     appId: string;
   };
+  auth0?: {
+    issuer: string;
+    audience: string;
+    emailClaim: string;
+    emailVerifiedClaim: string;
+  };
   oauth: {
     accessTokenTtlSeconds: number;
     refreshTokenTtlSeconds: number;
@@ -59,6 +65,25 @@ function parseUrl(name: string, value: string): URL {
   }
 }
 
+function optionalAuth0Config(environment: NodeJS.ProcessEnv, publicBaseUrl: URL): AppConfig['auth0'] {
+  const issuerValue = environment.AUTH0_ISSUER?.trim();
+  if (!issuerValue) {
+    return undefined;
+  }
+  const issuer = parseUrl('AUTH0_ISSUER', issuerValue);
+  if (issuer.protocol !== 'https:' || issuer.search || issuer.hash || issuer.username || issuer.password) {
+    throw new Error('AUTH0_ISSUER must be an HTTPS issuer URL without credentials, query, or fragment');
+  }
+  const audience = new URL('/chatgpt/mcp', publicBaseUrl).toString();
+  const claimNamespace = new URL('/auth0', publicBaseUrl).toString();
+  return {
+    issuer: issuer.toString(),
+    audience,
+    emailClaim: `${claimNamespace}/email`,
+    emailVerifiedClaim: `${claimNamespace}/email_verified`,
+  };
+}
+
 function originHostnames(value: string | undefined): string[] {
   if (!value) {
     return [];
@@ -93,6 +118,7 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env): AppCon
       authDomain: required('FIREBASE_AUTH_DOMAIN', environment),
       appId: required('FIREBASE_WEB_APP_ID', environment),
     },
+    auth0: optionalAuth0Config(environment, publicBaseUrl),
     oauth: {
       accessTokenTtlSeconds: parseSeconds('MCP_ACCESS_TOKEN_TTL_SECONDS', environment.MCP_ACCESS_TOKEN_TTL_SECONDS, 900, 60, 3600),
       refreshTokenTtlSeconds: parseSeconds(
