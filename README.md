@@ -39,7 +39,7 @@ For Claude’s current custom-connector OAuth callback failure, the server also 
 | `GET /health` | Unauthenticated liveness endpoint. |
 | `GET /.well-known/oauth-protected-resource` | Protected-resource metadata. The `/mcp` suffix variant is also served. |
 | `GET /.well-known/oauth-authorization-server` | OAuth authorization-server metadata. |
-| `POST /oauth/register` | Dynamic Client Registration implementation; intentionally not advertised in metadata. |
+| `POST /oauth/register` | Dynamic Client Registration endpoint for MCP clients such as ChatGPT. |
 | `GET /oauth/authorize` | Authorization request, Firebase browser sign-in, then consent. |
 | `POST /oauth/token` | Authorization-code and refresh-token grants. |
 | `GET /tokens` | Firebase-authenticated personal access-token management page. |
