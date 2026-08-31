@@ -14,6 +14,8 @@ A multi-user [Model Context Protocol](https://modelcontextprotocol.io/) server f
 - Revocable, time-limited personal access tokens for Claude while its custom-connector OAuth callback is unavailable
 - `search_beers` and `get_beer`
 - `get_my_profile`, `get_my_wishlist`, and `get_my_beers`
+- `get_user_profile`, `get_user_beers`, and `get_user_checkins` for any Untappd username
+- `check_user_had_beer` — "has USERNAME ever checked in this beer?", with their rating and first/last dates
 - `check_in`, with rating and message validation
 - Untappd authorization-code connect flow: `GET /connect/untappd`
 - AES-256-GCM encryption at rest for credentials in Firestore collection `untappd_credentials`

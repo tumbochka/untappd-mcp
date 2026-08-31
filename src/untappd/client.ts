@@ -25,6 +25,57 @@ export class UntappdApiError extends Error {
   }
 }
 
+type UserBeerItem = {
+  count?: number;
+  first_had?: string;
+  first_checkin_id?: number;
+  first_created_at?: string;
+  recent_created_at?: string;
+  /** In user/beers/USERNAME this is the queried user's own rating (0 when unrated). */
+  rating_score?: number;
+  beer?: { bid?: number; beer_name?: string };
+  brewery?: { brewery_name?: string };
+};
+
+function numberOrNull(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+function ratingOrNull(value: unknown): number | null {
+  return typeof value === 'number' && value > 0 ? value : null;
+}
+
+export type UserBeersSort =
+  | 'date'
+  | 'checkin'
+  | 'highest_rated'
+  | 'lowest_rated'
+  | 'highest_rated_you'
+  | 'lowest_rated_you';
+
+export type UserBeerLookup = {
+  username: string;
+  beerId: number;
+  found: boolean;
+  /** True when the user's full distinct-beer list (within any date window) was scanned without a match. */
+  exhausted: boolean;
+  /** True when the target profile is private / locked to this caller. */
+  locked: boolean;
+  scannedDistinctBeers: number;
+  totalDistinctBeers: number | null;
+  requestsUsed: number;
+  match: {
+    beerId: number;
+    beerName: string | null;
+    breweryName: string | null;
+    userRating: number | null;
+    checkinCount: number | null;
+    firstHadAt: string | null;
+    lastHadAt: string | null;
+    firstCheckinId: number | null;
+  } | null;
+};
+
 export class UntappdClient {
   private static readonly apiBaseUrl = 'https://api.untappd.com/v4/';
   private static readonly oauthAuthenticateUrl = 'https://untappd.com/oauth/authenticate/';
@@ -77,6 +128,153 @@ export class UntappdClient {
 
   async getDistinctBeers(accessToken: string, limit: number, offset: number): Promise<unknown> {
     return this.get('user/beers/', { limit: String(limit), offset: String(offset) }, accessToken);
+  }
+
+  async getUserInfo(username: string, accessToken?: string, compact = false): Promise<unknown> {
+    return this.get(
+      `user/info/${encodeURIComponent(username)}`,
+      compact ? { compact: 'true' } : {},
+      accessToken
+    );
+  }
+
+  async getUserBeers(
+    username: string,
+    options: {
+      limit: number;
+      offset: number;
+      sort?: UserBeersSort;
+      startDate?: string;
+      endDate?: string;
+    },
+    accessToken?: string
+  ): Promise<unknown> {
+    const query: Record<string, string> = {
+      limit: String(options.limit),
+      offset: String(options.offset),
+    };
+    if (options.sort) {
+      query.sort = options.sort;
+    }
+    if (options.startDate) {
+      query.start_date = options.startDate;
+    }
+    if (options.endDate) {
+      query.end_date = options.endDate;
+    }
+    return this.get(`user/beers/${encodeURIComponent(username)}`, query, accessToken);
+  }
+
+  async getUserCheckins(
+    username: string,
+    options: { limit: number; maxId?: number; minId?: number },
+    accessToken?: string
+  ): Promise<unknown> {
+    const query: Record<string, string> = { limit: String(options.limit) };
+    if (options.maxId !== undefined) {
+      query.max_id = String(options.maxId);
+    }
+    if (options.minId !== undefined) {
+      query.min_id = String(options.minId);
+    }
+    return this.get(`user/checkins/${encodeURIComponent(username)}`, query, accessToken);
+  }
+
+  /**
+   * Untappd exposes no "has user X had beer Y" endpoint, so page through the
+   * user's distinct beers (newest first) until the beer id is found or the list
+   * is exhausted. `maxRequests` caps the paging to protect the hourly API quota.
+   */
+  async findUserBeer(
+    username: string,
+    beerId: number,
+    options: {
+      accessToken?: string;
+      maxRequests?: number;
+      startDate?: string;
+      endDate?: string;
+      sort?: UserBeersSort;
+    } = {}
+  ): Promise<UserBeerLookup> {
+    const pageSize = 50;
+    const maxRequests = Math.max(1, Math.min(options.maxRequests ?? 12, 40));
+    let offset = 0;
+    let scanned = 0;
+    let requestsUsed = 0;
+    let totalDistinctBeers: number | null = null;
+    let locked = false;
+
+    for (let page = 0; page < maxRequests; page += 1) {
+      const response = (await this.getUserBeers(
+        username,
+        { limit: pageSize, offset, sort: options.sort, startDate: options.startDate, endDate: options.endDate },
+        options.accessToken
+      )) as {
+        total_count?: number;
+        is_locked?: number | boolean;
+        beers?: { items?: UserBeerItem[] };
+      };
+      requestsUsed += 1;
+      if (typeof response.total_count === 'number') {
+        totalDistinctBeers = response.total_count;
+      }
+      locked = Boolean(response.is_locked);
+      const items = response.beers?.items ?? [];
+
+      const hit = items.find(item => item?.beer?.bid === beerId);
+      if (hit) {
+        return {
+          username,
+          beerId,
+          found: true,
+          exhausted: false,
+          locked,
+          scannedDistinctBeers: scanned + items.indexOf(hit) + 1,
+          totalDistinctBeers,
+          requestsUsed,
+          match: {
+            beerId,
+            beerName: hit.beer?.beer_name ?? null,
+            breweryName: hit.brewery?.brewery_name ?? null,
+            userRating: ratingOrNull(hit.rating_score),
+            checkinCount: numberOrNull(hit.count),
+            firstHadAt: hit.first_created_at ?? hit.first_had ?? null,
+            lastHadAt: hit.recent_created_at ?? null,
+            firstCheckinId: numberOrNull(hit.first_checkin_id),
+          },
+        };
+      }
+
+      scanned += items.length;
+      offset += items.length;
+      const reachedEnd =
+        items.length < pageSize || (totalDistinctBeers !== null && offset >= totalDistinctBeers);
+      if (reachedEnd) {
+        return {
+          username,
+          beerId,
+          found: false,
+          exhausted: true,
+          locked,
+          scannedDistinctBeers: scanned,
+          totalDistinctBeers,
+          requestsUsed,
+          match: null,
+        };
+      }
+    }
+
+    return {
+      username,
+      beerId,
+      found: false,
+      exhausted: false,
+      locked,
+      scannedDistinctBeers: scanned,
+      totalDistinctBeers,
+      requestsUsed,
+      match: null,
+    };
   }
 
   async checkIn(input: {
