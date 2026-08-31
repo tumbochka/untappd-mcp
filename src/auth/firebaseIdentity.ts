@@ -11,6 +11,8 @@ export type FirebasePrincipal = {
 export type FirebaseSession = {
   uid: string;
   expiresAt: number;
+  email?: string;
+  emailVerified: boolean;
 };
 
 function firebaseApp(projectId?: string): App {
@@ -58,6 +60,11 @@ export class FirebaseIdentityVerifier {
 
   async verifySessionCookie(cookie: string): Promise<FirebaseSession> {
     const decoded = await this.auth.verifySessionCookie(cookie, true);
-    return { uid: decoded.uid, expiresAt: decoded.exp };
+    return {
+      uid: decoded.uid,
+      expiresAt: decoded.exp,
+      ...(typeof decoded.email === 'string' && decoded.email.trim() ? { email: decoded.email.trim() } : {}),
+      emailVerified: decoded.email_verified === true,
+    };
   }
 }

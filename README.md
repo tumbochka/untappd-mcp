@@ -49,6 +49,10 @@ For Claude’s current custom-connector OAuth callback failure, the server also 
 
 The server keeps only hashes of MCP access, authorization-code, and refresh tokens in Firestore. Refresh tokens rotate; a reused refresh token revokes its whole token family. Untappd access tokens use AES-256-GCM encryption before storage.
 
+### Legacy degustation-app migration
+
+When a user opens `/tokens`, the server first checks for an existing encrypted credential. If none exists, it imports `users/{uid}.untappdAccessToken` from the old degustation app. When Firebase UID differs, it falls back only to one exact match of the user’s **verified Firebase email**. The token is validated with Untappd before being encrypted into `untappd_credentials/{uid}`. Legacy Firestore documents are read-only during this migration and their plaintext token is not deleted.
+
 ## Untappd connection flow
 
 1. The user opens `/connect/untappd` and signs in with Firebase if no browser session exists.

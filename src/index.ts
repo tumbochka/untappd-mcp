@@ -9,6 +9,11 @@ import { FormTokenSigner } from './auth/formToken.js';
 import { FirestorePersonalAccessTokenStore, PersonalAccessTokenService } from './auth/personalAccessToken.js';
 import { loadConfig } from './config.js';
 import { FirestoreCredentialStore } from './credentials/credentialStore.js';
+import {
+  FirestoreLegacyCredentialSource,
+  LegacyCredentialMigrationService,
+  type LegacyMigrationResult,
+} from './credentials/legacyCredentialMigration.js';
 import { TokenCipher } from './credentials/tokenCipher.js';
 import { cookieValue, expiredCookie, HttpRequestError, readForm, readJson, sessionCookie } from './http.js';
 import { createUntappdMcpServer } from './mcp/server.js';
@@ -29,6 +34,11 @@ const config = loadConfig();
 const firebaseIdentity = new FirebaseIdentityVerifier(config.firebaseProjectId);
 const credentialStore = new FirestoreCredentialStore(new TokenCipher(config.tokenEncryptionKey));
 const untappd = new UntappdClient(config.untappd);
+const legacyCredentialMigration = new LegacyCredentialMigrationService(
+  credentialStore,
+  new FirestoreLegacyCredentialSource(),
+  untappd
+);
 const stateSigner = new ConnectStateSigner(config.connectStateSecret);
 const formTokenSigner = new FormTokenSigner(config.connectStateSecret);
 const oauth = new McpOAuthService(
@@ -180,6 +190,29 @@ function asMcpAuthInfo(principal: Awaited<ReturnType<typeof oauth.authenticate>>
 function bearerToken(authorizationHeader: string | undefined): string | null {
   const [scheme, token] = authorizationHeader?.split(/\s+/, 2) ?? [];
   return scheme === 'Bearer' && token ? token : null;
+}
+
+async function migrateLegacyCredential(session: FirebaseSession): Promise<LegacyMigrationResult> {
+  try {
+    return await legacyCredentialMigration.migrate({
+      firebaseUid: session.uid,
+      email: session.email,
+      emailVerified: session.emailVerified,
+    });
+  } catch (error) {
+    console.warn('Legacy Untappd credential migration failed', error);
+    return 'unavailable';
+  }
+}
+
+function migrationMessage(result: LegacyMigrationResult): string | undefined {
+  if (result === 'imported') {
+    return 'Your existing Untappd connection was imported from the legacy degustation app.';
+  }
+  if (result === 'invalid_token') {
+    return 'A saved legacy Untappd connection was found, but it is no longer valid. Connect Untappd again to continue.';
+  }
+  return undefined;
 }
 
 function resourceMetadata(): Record<string, unknown> {
@@ -386,6 +419,7 @@ async function handlePersonalAccessTokensPage(request: IncomingMessage, response
     writeRedirect(response, '/oauth/login?continue=%2Ftokens');
     return;
   }
+  const legacyMigration = await migrateLegacyCredential(session);
   const pageNonce = nonce();
   writeHtml(
     response,
@@ -394,6 +428,7 @@ async function handlePersonalAccessTokensPage(request: IncomingMessage, response
       tokens: await personalAccessTokens.list(session.uid),
       createCsrfToken: formTokenSigner.sign(session.uid, 'create', Math.floor(Date.now() / 1000) + 10 * 60),
       revokeCsrfToken: formTokenSigner.sign(session.uid, 'revoke', Math.floor(Date.now() / 1000) + 10 * 60),
+      migrationMessage: migrationMessage(legacyMigration),
       nonce: pageNonce,
     }),
     pageNonce
@@ -406,6 +441,7 @@ async function handlePersonalAccessTokenCreate(request: IncomingMessage, respons
     writeJson(response, 401, { error: 'login_required', message: 'Sign in again before creating a token.' });
     return;
   }
+  await migrateLegacyCredential(session);
   const form = await readForm(request);
   try {
     formTokenSigner.verify(form.get('csrf_token'), session.uid, 'create', Math.floor(Date.now() / 1000));

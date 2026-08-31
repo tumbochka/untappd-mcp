@@ -41,6 +41,7 @@ function document(title: string, body: string, nonce?: string): string {
       .token-list { padding-left: 1.25rem; }
       .token-list li { margin: 1rem 0; }
       .muted { color: #666; }
+      .notice { padding: .75rem; border: 1px solid #15803d; border-radius: .45rem; color: #166534; }
       #error { color: #b91c1c; min-height: 1.5rem; }
       code { overflow-wrap: anywhere; }
     </style>
@@ -125,6 +126,7 @@ export function personalAccessTokenPage(input: {
   }>;
   createCsrfToken: string;
   revokeCsrfToken: string;
+  migrationMessage?: string;
   nonce: string;
 }): string {
   const tokens = input.tokens.length
@@ -146,6 +148,7 @@ export function personalAccessTokenPage(input: {
     : '<p class="muted">No personal access tokens have been created.</p>';
   const body = `<main class="card">
   <h1>Personal access tokens</h1>
+  ${input.migrationMessage ? `<p class="notice" role="status">${escapeHtml(input.migrationMessage)}</p>` : ''}
   <p>Create a token to connect Claude without its OAuth callback. A token acts as your MCP identity and can read and create Untappd check-ins, so keep it private.</p>
   <form action="/tokens" method="post"><input type="hidden" name="csrf_token" value="${escapeHtml(input.createCsrfToken)}"><button class="primary" type="submit">Create token for Claude</button></form>
   <h2>Existing tokens</h2>
