@@ -36,6 +36,11 @@ function document(title: string, body: string, nonce?: string): string {
       button { padding: .7rem 1rem; border: 0; border-radius: .45rem; font: inherit; cursor: pointer; }
       .primary { background: #2563eb; color: white; }
       .secondary { background: #6b7280; color: white; margin-left: .75rem; }
+      .danger { background: #b91c1c; color: white; }
+      .token { display: block; margin: 1rem 0; padding: .8rem; border: 1px solid #7776; border-radius: .45rem; white-space: pre-wrap; }
+      .token-list { padding-left: 1.25rem; }
+      .token-list li { margin: 1rem 0; }
+      .muted { color: #666; }
       #error { color: #b91c1c; min-height: 1.5rem; }
       code { overflow-wrap: anywhere; }
     </style>
@@ -108,4 +113,62 @@ export function authorizationConsentPage(input: {
   </form>
 </main>`;
   return document('Authorize Untappd MCP', body, input.nonce);
+}
+
+export function personalAccessTokenPage(input: {
+  tokens: Array<{
+    id: string;
+    label: string;
+    createdAt: number;
+    expiresAt: number;
+    revokedAt?: number;
+  }>;
+  nonce: string;
+}): string {
+  const tokens = input.tokens.length
+    ? `<ul class="token-list">${input.tokens
+        .map(token => {
+          const status = token.revokedAt
+            ? `Revoked ${escapeHtml(new Date(token.revokedAt * 1000).toISOString())}`
+            : token.expiresAt <= Date.now() / 1000
+              ? 'Expired'
+              : `Active until ${escapeHtml(new Date(token.expiresAt * 1000).toISOString())}`;
+          const revoke = token.revokedAt || token.expiresAt <= Date.now() / 1000
+            ? ''
+            : `<form action="/tokens/revoke" method="post"><input type="hidden" name="token_id" value="${escapeHtml(token.id)}"><button class="danger" type="submit">Revoke</button></form>`;
+          return `<li><strong>${escapeHtml(token.label)}</strong><br><span class="muted">Created ${escapeHtml(
+            new Date(token.createdAt * 1000).toISOString()
+          )} · ${status}</span>${revoke}</li>`;
+        })
+        .join('')}</ul>`
+    : '<p class="muted">No personal access tokens have been created.</p>';
+  const body = `<main class="card">
+  <h1>Personal access tokens</h1>
+  <p>Create a token to connect Claude without its OAuth callback. A token acts as your MCP identity and can read and create Untappd check-ins, so keep it private.</p>
+  <form action="/tokens" method="post"><button class="primary" type="submit">Create token for Claude</button></form>
+  <h2>Existing tokens</h2>
+  ${tokens}
+</main>`;
+  return document('Untappd MCP tokens', body, input.nonce);
+}
+
+export function personalAccessTokenCreatedPage(input: { token: string; expiresAt: number; nonce: string }): string {
+  const headerValue = `Bearer ${input.token}`;
+  const body = `<main class="card">
+  <h1>Token created</h1>
+  <p>Copy this value now. It cannot be shown again. It expires on <strong>${escapeHtml(
+    new Date(input.expiresAt * 1000).toISOString()
+  )}</strong>.</p>
+  <code id="header-value" class="token">${escapeHtml(headerValue)}</code>
+  <button id="copy" class="primary" type="button">Copy header value</button>
+  <p>In Claude, set Authentication to <strong>None</strong>, then add a request header named <code>Authorization</code> with the copied value.</p>
+  <p><a href="/tokens">Back to tokens</a></p>
+</main>
+<script nonce="${input.nonce}">
+  document.getElementById('copy').addEventListener('click', async () => {
+    await navigator.clipboard.writeText(document.getElementById('header-value').textContent);
+    document.getElementById('copy').textContent = 'Copied';
+  });
+</script>`;
+  return document('Personal access token created', body, input.nonce);
 }

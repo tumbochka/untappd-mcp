@@ -10,6 +10,7 @@ A multi-user [Model Context Protocol](https://modelcontextprotocol.io/) server f
 - Claude Client ID Metadata Document (CIMD) support and a pre-registered public Claude client fallback
 - Short-lived, audience-bound opaque access tokens and rotating refresh tokens
 - Firebase Auth Google sign-in and a secure server-side browser session
+- Revocable, time-limited personal access tokens for Claude while its custom-connector OAuth callback is unavailable
 - `search_beers` and `get_beer`
 - `get_my_profile`, `get_my_wishlist`, and `get_my_beers`
 - `check_in`, with rating and message validation
@@ -30,7 +31,7 @@ Firebase browser sign-in ──> MCP OAuth server ── MCP access token ──
 
 Firebase Auth identifies the person in the browser and creates a secure HTTP-only session. The MCP authorization server then issues its own access token whose owner is that Firebase `uid`, whose audience is exactly this server’s `/mcp` URL, and whose scopes are `untappd:read` and `untappd:write`.
 
-Unauthenticated MCP requests receive `401` with protected-resource metadata. A compatible client such as Claude discovers the authorization server, resolves its hosted client metadata (or uses the pre-registered public Claude client), sends the user through Firebase sign-in and the consent screen, then exchanges a PKCE-protected code for MCP tokens.
+For Claude’s current custom-connector OAuth callback failure, the server also provides personal access tokens. They are created only from an authenticated Firebase browser session, are shown once, stored only as SHA-256 hashes, bound to the Firebase `uid`, expire automatically, and can be revoked at any time. They use the same bearer-token MCP transport but do not depend on Claude completing an authorization-code exchange.
 
 | Endpoint | Purpose |
 | --- | --- |
@@ -41,6 +42,9 @@ Unauthenticated MCP requests receive `401` with protected-resource metadata. A c
 | `POST /oauth/register` | Dynamic Client Registration implementation; intentionally not advertised in metadata. |
 | `GET /oauth/authorize` | Authorization request, Firebase browser sign-in, then consent. |
 | `POST /oauth/token` | Authorization-code and refresh-token grants. |
+| `GET /tokens` | Firebase-authenticated personal access-token management page. |
+| `POST /tokens` | Creates a personal access token and shows it once. |
+| `POST /tokens/revoke` | Revokes one of the signed-in user’s personal access tokens. |
 | `GET /connect/untappd` | Starts the separate Untappd authorization flow for the signed-in Firebase user. |
 
 The server keeps only hashes of MCP access, authorization-code, and refresh tokens in Firestore. Refresh tokens rotate; a reused refresh token revokes its whole token family. Untappd access tokens use AES-256-GCM encryption before storage.
@@ -56,14 +60,17 @@ Legacy field `users/{uid}.untappdAccessToken` is intentionally not read. Migrate
 
 ## Claude connector setup
 
-Use `https://YOUR_CLOUD_RUN_OR_CUSTOM_DOMAIN/mcp` as the connector URL. Select **Always required** authentication. If Claude does not use its hosted client metadata and reports that automatic client registration is unsupported, choose **Use your own OAuth client** and enter:
+Claude’s custom-connector OAuth callback currently fails before it calls the token endpoint, even after a valid authorization code is delivered. Use a personal access token until that issue is fixed:
+
+1. Open `https://YOUR_CLOUD_RUN_OR_CUSTOM_DOMAIN/tokens` and sign in with the Firebase account whose Untappd data you want Claude to use.
+2. Select **Create token for Claude**, then copy the displayed header value. It is shown once only.
+3. In Claude’s connector settings, use `https://YOUR_CLOUD_RUN_OR_CUSTOM_DOMAIN/mcp`, select **Authentication: None**, and add this request header:
 
 ```text
-Client ID: untappd-mcp-claude
-Client secret: leave blank
+Authorization: Bearer pat_…
 ```
 
-This is a public OAuth client restricted to Claude's exact HTTPS callback URL. PKCE S256 remains mandatory, so the client ID is not a secret.
+Use the **Revoke** button on `/tokens` immediately if the token is exposed. A token uses the same read/write Untappd scope as an OAuth connection, so Claude must still ask for confirmation before check-ins.
 
 ## Local development
 
@@ -107,11 +114,12 @@ UNTAPPD_CLIENT_ID=...
 UNTAPPD_REDIRECT_URI=https://YOUR_CLOUD_RUN_OR_CUSTOM_DOMAIN/connect/untappd/callback
 UNTAPPD_USER_AGENT=untappd-mcp/0.1 (support@example.com)
 MCP_ALLOWED_ORIGINS=https://claude.ai
+MCP_PERSONAL_ACCESS_TOKEN_TTL_SECONDS=15552000
 ```
 
 `PUBLIC_BASE_URL` and `UNTAPPD_REDIRECT_URI` must use the exact final HTTPS origin. Add that hostname to **Firebase Console → Authentication → Settings → Authorized domains** before using the OAuth browser login. The browser config fields are Firebase public configuration, not credentials.
 
-Create Firestore TTL policies for `expiresAt` in these collection groups: `mcp_oauth_transactions`, `mcp_oauth_authorization_codes`, `mcp_oauth_access_tokens`, and `mcp_oauth_refresh_tokens`. TTL reduces retained metadata; server-side expiry checks remain mandatory.
+Create Firestore TTL policies for `expiresAt` in these collection groups: `mcp_oauth_transactions`, `mcp_oauth_authorization_codes`, `mcp_oauth_access_tokens`, `mcp_oauth_refresh_tokens`, and `mcp_personal_access_tokens`. TTL reduces retained metadata; server-side expiry checks remain mandatory.
 
 ## Security notes
 
@@ -120,5 +128,6 @@ Create Firestore TTL policies for `expiresAt` in these collection groups: `mcp_o
 - The OAuth callback uses a signed and expiring `state` value to prevent CSRF.
 - OAuth authorization codes are one-time, expire after one minute, and require PKCE S256. Redirect URIs are exact-match registered values.
 - MCP access tokens are short-lived and audience-bound to this server. Untappd tokens are never accepted at `/mcp`.
+- Personal access tokens are displayed only once, stored as hashes, expire after 180 days by default, and can be revoked from `/tokens`.
 - `check_in` is intentionally marked non-idempotent. The calling model must get user confirmation before invoking it.
 - `untappd:write` is required for `check_in`; all other current tools require `untappd:read`.

@@ -15,6 +15,7 @@ export type AppConfig = {
     accessTokenTtlSeconds: number;
     refreshTokenTtlSeconds: number;
     sessionTtlSeconds: number;
+    personalAccessTokenTtlSeconds: number;
   };
   untappd: {
     clientId: string;
@@ -107,6 +108,13 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env): AppCon
         60 * 60 * 24 * 7,
         60 * 60,
         60 * 60 * 24 * 14
+      ),
+      personalAccessTokenTtlSeconds: parseSeconds(
+        'MCP_PERSONAL_ACCESS_TOKEN_TTL_SECONDS',
+        environment.MCP_PERSONAL_ACCESS_TOKEN_TTL_SECONDS,
+        60 * 60 * 24 * 180,
+        60 * 60 * 24,
+        60 * 60 * 24 * 365
       ),
     },
     untappd: {

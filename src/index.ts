@@ -5,12 +5,18 @@ import { hostHeaderValidation, originValidation, toNodeHandler } from '@modelcon
 import { createMcpHandler, type AuthInfo } from '@modelcontextprotocol/server';
 import { ConnectStateSigner } from './auth/connectState.js';
 import { FirebaseIdentityVerifier, type FirebaseSession } from './auth/firebaseIdentity.js';
+import { FirestorePersonalAccessTokenStore, PersonalAccessTokenService } from './auth/personalAccessToken.js';
 import { loadConfig } from './config.js';
 import { FirestoreCredentialStore } from './credentials/credentialStore.js';
 import { TokenCipher } from './credentials/tokenCipher.js';
 import { cookieValue, expiredCookie, HttpRequestError, readForm, readJson, sessionCookie } from './http.js';
 import { createUntappdMcpServer } from './mcp/server.js';
-import { authorizationConsentPage, firebaseLoginPage } from './oauth/html.js';
+import {
+  authorizationConsentPage,
+  firebaseLoginPage,
+  personalAccessTokenCreatedPage,
+  personalAccessTokenPage,
+} from './oauth/html.js';
 import { McpOAuthService, MCP_SCOPES, OAuthProtocolError } from './oauth/service.js';
 import { FirestoreOAuthStore } from './oauth/store.js';
 import { UntappdClient } from './untappd/client.js';
@@ -28,6 +34,10 @@ const oauth = new McpOAuthService(
   config.publicBaseUrl,
   config.oauth.accessTokenTtlSeconds,
   config.oauth.refreshTokenTtlSeconds
+);
+const personalAccessTokens = new PersonalAccessTokenService(
+  new FirestorePersonalAccessTokenStore(),
+  config.oauth.personalAccessTokenTtlSeconds
 );
 
 const mcpHandler = createMcpHandler(
@@ -121,7 +131,10 @@ function sessionContinuation(value: string | null): string {
   } catch {
     throw new OAuthProtocolError('invalid_request', 'Invalid continuation URL');
   }
-  if (url.origin !== config.publicBaseUrl.origin || !['/oauth/authorize', '/connect/untappd'].includes(url.pathname)) {
+  if (
+    url.origin !== config.publicBaseUrl.origin ||
+    !['/oauth/authorize', '/connect/untappd', '/tokens'].includes(url.pathname)
+  ) {
     throw new OAuthProtocolError('invalid_request', 'Invalid continuation URL');
   }
   return `${url.pathname}${url.search}`;
@@ -160,6 +173,17 @@ function asMcpAuthInfo(principal: Awaited<ReturnType<typeof oauth.authenticate>>
     resource: new URL(oauth.resource),
     extra: { firebaseUid: principal.firebaseUid, authorizationServer: oauth.issuer },
   };
+}
+
+function bearerToken(authorizationHeader: string | undefined): string | null {
+  const [scheme, token] = authorizationHeader?.split(/\s+/, 2) ?? [];
+  return scheme === 'Bearer' && token ? token : null;
+}
+
+function requireSameOriginForm(request: IncomingMessage): void {
+  if (request.headers.origin !== config.publicBaseUrl.origin) {
+    throw new OAuthProtocolError('invalid_request', 'This form must be submitted from Untappd MCP.');
+  }
 }
 
 function resourceMetadata(): Record<string, unknown> {
@@ -360,9 +384,60 @@ async function handleUntappdCallback(request: IncomingMessage, response: ServerR
   }
 }
 
+async function handlePersonalAccessTokensPage(request: IncomingMessage, response: ServerResponse): Promise<void> {
+  const session = await firebaseSession(request);
+  if (!session) {
+    writeRedirect(response, '/oauth/login?continue=%2Ftokens');
+    return;
+  }
+  const pageNonce = nonce();
+  writeHtml(
+    response,
+    200,
+    personalAccessTokenPage({ tokens: await personalAccessTokens.list(session.uid), nonce: pageNonce }),
+    pageNonce
+  );
+}
+
+async function handlePersonalAccessTokenCreate(request: IncomingMessage, response: ServerResponse): Promise<void> {
+  requireSameOriginForm(request);
+  const session = await firebaseSession(request);
+  if (!session) {
+    writeJson(response, 401, { error: 'login_required', message: 'Sign in again before creating a token.' });
+    return;
+  }
+  await readForm(request);
+  const issued = await personalAccessTokens.issue(session.uid);
+  const pageNonce = nonce();
+  writeHtml(
+    response,
+    201,
+    personalAccessTokenCreatedPage({ token: issued.token, expiresAt: issued.record.expiresAt, nonce: pageNonce }),
+    pageNonce
+  );
+}
+
+async function handlePersonalAccessTokenRevoke(request: IncomingMessage, response: ServerResponse): Promise<void> {
+  requireSameOriginForm(request);
+  const session = await firebaseSession(request);
+  if (!session) {
+    writeJson(response, 401, { error: 'login_required', message: 'Sign in again before revoking a token.' });
+    return;
+  }
+  const tokenId = (await readForm(request)).get('token_id');
+  if (!tokenId || !/^[A-Za-z0-9_-]{43}$/.test(tokenId)) {
+    throw new OAuthProtocolError('invalid_request', 'Invalid personal access token');
+  }
+  await personalAccessTokens.revoke(tokenId, session.uid);
+  writeRedirect(response, '/tokens');
+}
+
 async function handleMcp(request: IncomingMessage, response: ServerResponse): Promise<void> {
   try {
-    const principal = await oauth.authenticate(request.headers.authorization);
+    const token = bearerToken(request.headers.authorization);
+    const principal = token?.startsWith('pat_')
+      ? await personalAccessTokens.authenticate(token)
+      : await oauth.authenticate(request.headers.authorization);
     (request as AuthenticatedRequest).auth = asMcpAuthInfo(principal);
     await nodeMcpHandler(request as AuthenticatedRequest, response);
   } catch (error) {
@@ -430,6 +505,18 @@ const httpServer = createServer(async (request, response) => {
     }
     if (request.method === 'POST' && url.pathname === '/oauth/register') {
       await handleRegister(request, response);
+      return;
+    }
+    if (request.method === 'GET' && url.pathname === '/tokens') {
+      await handlePersonalAccessTokensPage(request, response);
+      return;
+    }
+    if (request.method === 'POST' && url.pathname === '/tokens') {
+      await handlePersonalAccessTokenCreate(request, response);
+      return;
+    }
+    if (request.method === 'POST' && url.pathname === '/tokens/revoke') {
+      await handlePersonalAccessTokenRevoke(request, response);
       return;
     }
     if (request.method === 'GET' && url.pathname === '/connect/untappd') {
