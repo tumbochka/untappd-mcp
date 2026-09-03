@@ -28,6 +28,10 @@ class MemoryOAuthStore implements OAuthStore {
     this.clients.set(client.clientId, client);
   }
 
+  async upsertClient(client: OAuthClient): Promise<void> {
+    this.clients.set(client.clientId, client);
+  }
+
   async getClient(clientId: string): Promise<OAuthClient | null> {
     return this.clients.get(clientId) ?? null;
   }
@@ -533,6 +537,75 @@ test('OAuth rejects an unrecognised CIMD-shaped client_id without crashing', asy
       /Unknown client_id/
     );
     assert.equal(fetched, false);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+test('OAuth falls back to a cached CIMD client when the metadata document 404s', async () => {
+  const clientId = 'https://chatgpt.com/oauth/codex/UkDmn2yFP-9y/client.json';
+  const doc = {
+    client_id: clientId,
+    client_name: 'Codex',
+    redirect_uris: ['http://127.0.0.1/callback/UkDmn2yFP-9y', 'http://localhost/callback/UkDmn2yFP-9y'],
+    token_endpoint_auth_method: 'none',
+    grant_types: ['authorization_code', 'refresh_token'],
+    response_types: ['code'],
+  };
+  const params = () =>
+    new URLSearchParams({
+      response_type: 'code',
+      client_id: clientId,
+      redirect_uri: 'http://127.0.0.1:41000/callback/UkDmn2yFP-9y',
+      resource: oauth.resource,
+      scope: 'untappd:read untappd:write',
+      code_challenge: pkceChallenge('m'.repeat(64)),
+      code_challenge_method: 'S256',
+    });
+
+  const store = new MemoryOAuthStore();
+  const oauth = new McpOAuthService(store, new URL('https://untappd-mcp.example.com'), 900, 3600);
+  const realFetch = globalThis.fetch;
+
+  // First attempt: document is live -> resolved and cached.
+  globalThis.fetch = (async () =>
+    new Response(JSON.stringify(doc), { status: 200, headers: { 'content-type': 'application/json' } })) as typeof fetch;
+  try {
+    const first = await oauth.validateAuthorizationRequest(params());
+    assert.equal(first.client.clientName, 'Codex');
+    assert.equal(store.clients.size, 1);
+
+    // Second attempt: document is gone -> fall back to the cached client.
+    globalThis.fetch = (async () =>
+      new Response('not found', { status: 404, headers: { 'content-type': 'text/plain' } })) as typeof fetch;
+    const second = await oauth.validateAuthorizationRequest(params());
+    assert.equal(second.client.clientName, 'Codex');
+    assert.equal(second.redirectUri, 'http://127.0.0.1:41000/callback/UkDmn2yFP-9y');
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+test('OAuth surfaces the fetch error when a CIMD document is unavailable and never cached', async () => {
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (async () =>
+    new Response('nope', { status: 404, headers: { 'content-type': 'text/plain' } })) as typeof fetch;
+  try {
+    const oauth = new McpOAuthService(new MemoryOAuthStore(), new URL('https://untappd-mcp.example.com'), 900, 3600);
+    await assert.rejects(
+      oauth.validateAuthorizationRequest(
+        new URLSearchParams({
+          response_type: 'code',
+          client_id: 'https://chatgpt.com/oauth/codex/never-seen/client.json',
+          redirect_uri: 'http://127.0.0.1:41000/callback/never-seen',
+          resource: oauth.resource,
+          scope: 'untappd:read',
+          code_challenge: pkceChallenge('n'.repeat(64)),
+          code_challenge_method: 'S256',
+        })
+      ),
+      /unavailable/
+    );
   } finally {
     globalThis.fetch = realFetch;
   }

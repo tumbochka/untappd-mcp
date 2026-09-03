@@ -366,12 +366,25 @@ export class McpOAuthService {
       throw new OAuthProtocolError('invalid_request', 'PKCE S256 is required');
     }
     const clientId = required(parameters.get('client_id'), 'client_id');
-    const metadataClient = await this.resolveClientMetadata(clientId);
-    const client =
-      metadataClient ??
-      (clientId === CLAUDE_PRE_REGISTERED_CLIENT_ID
+    let client: OAuthClient | null;
+    try {
+      client = await this.resolveClientMetadata(clientId);
+    } catch (error) {
+      // A trusted CIMD document can vanish between attempts — OpenAI's
+      // per-connection `.../client.json` URLs are short-lived. If we resolved
+      // this client before, keep using the stored copy.
+      client = await this.store.getClient(clientId);
+      if (!client) {
+        throw error;
+      }
+    }
+    if (client && trustedCimdClientName(clientId)) {
+      await this.store.upsertClient(client).catch(() => undefined);
+    }
+    client ??=
+      clientId === CLAUDE_PRE_REGISTERED_CLIENT_ID
         ? claudePreRegisteredClient
-        : await this.store.getClient(clientId));
+        : await this.store.getClient(clientId);
     if (!client) {
       throw new OAuthProtocolError('unauthorized_client', 'Unknown client_id');
     }
