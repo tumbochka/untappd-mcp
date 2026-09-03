@@ -138,7 +138,7 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env): AppCon
     },
     auth0: optionalAuth0Config(environment, publicBaseUrl),
     oauth: {
-      accessTokenTtlSeconds: parseSeconds('MCP_ACCESS_TOKEN_TTL_SECONDS', environment.MCP_ACCESS_TOKEN_TTL_SECONDS, 900, 60, 3600),
+      accessTokenTtlSeconds: parseSeconds('MCP_ACCESS_TOKEN_TTL_SECONDS', environment.MCP_ACCESS_TOKEN_TTL_SECONDS, 3600, 60, 3600),
       refreshTokenTtlSeconds: parseSeconds(
         'MCP_REFRESH_TOKEN_TTL_SECONDS',
         environment.MCP_REFRESH_TOKEN_TTL_SECONDS,

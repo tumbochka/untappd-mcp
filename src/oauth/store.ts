@@ -159,6 +159,13 @@ export class FirestoreOAuthStore implements OAuthStore {
   }
 
   async getClient(clientId: string): Promise<OAuthClient | null> {
+    // Dynamically registered client ids are `mcp_<base64url>`. Anything else
+    // (e.g. an unrecognised CIMD URL, which contains "/") is not a stored client
+    // and must not be passed to Firestore's doc() — a slash there is read as a
+    // nested path and throws.
+    if (!/^[A-Za-z0-9_-]{1,256}$/.test(clientId)) {
+      return null;
+    }
     const snapshot = await this.clients().doc(clientId).get();
     return snapshot.exists ? clientFromData(snapshot.data() as Record<string, unknown>) : null;
   }
