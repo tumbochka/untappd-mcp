@@ -273,14 +273,24 @@ function authorizationServerMetadata(): Record<string, unknown> {
   };
 }
 
-function mcpUnauthorized(response: ServerResponse, message: string): void {
+function mcpUnauthorized(
+  response: ServerResponse,
+  message: string,
+  options: { tokenPresented?: boolean } = {}
+): void {
+  const challenge = [
+    `Bearer resource_metadata="${config.publicBaseUrl.origin}/.well-known/oauth-protected-resource"`,
+  ];
+  if (options.tokenPresented) {
+    // RFC 6750 §3: an expired or otherwise invalid bearer token gets an explicit
+    // error code so the client refreshes instead of restarting discovery.
+    challenge.push('error="invalid_token"', `error_description="${message.replace(/["\\]/g, '')}"`);
+  }
   writeJson(
     response,
     401,
     { error: 'unauthorized', message },
-    {
-      'www-authenticate': `Bearer resource_metadata="${config.publicBaseUrl.origin}/.well-known/oauth-protected-resource"`,
-    }
+    { 'www-authenticate': challenge.join(', ') }
   );
 }
 
@@ -536,20 +546,21 @@ async function handlePersonalAccessTokenRevoke(request: IncomingMessage, respons
 }
 
 async function handleMcp(request: IncomingMessage, response: ServerResponse): Promise<void> {
+  const token = bearerToken(request.headers.authorization);
   try {
-    const token = bearerToken(request.headers.authorization);
     const principal = token?.startsWith('pat_')
       ? await personalAccessTokens.authenticate(token)
       : await oauth.authenticate(request.headers.authorization);
     (request as AuthenticatedRequest).auth = asMcpAuthInfo(principal);
     await nodeMcpHandler(request as AuthenticatedRequest, response);
   } catch (error) {
+    const tokenPresented = Boolean(token);
     if (error instanceof OAuthProtocolError) {
-      mcpUnauthorized(response, error.message);
+      mcpUnauthorized(response, error.message, { tokenPresented });
       return;
     }
     console.error('MCP authentication failed', error);
-    mcpUnauthorized(response, 'MCP authentication could not be completed.');
+    mcpUnauthorized(response, 'MCP authentication could not be completed.', { tokenPresented });
   }
 }
 
