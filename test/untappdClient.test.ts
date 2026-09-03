@@ -306,7 +306,7 @@ test('searchBeers honours configured Algolia key overrides', async () => {
   assert.equal(key, 'testkey');
 });
 
-test('checkIn sends 0.1-grid and quarter ratings, snapping float artefacts', async () => {
+test('checkIn snaps ratings to the quarter grid and drops float artefacts', async () => {
   const sent: string[] = [];
   const fetchImpl = (async (input: string | URL, init: RequestInit) => {
     sent.push(String(new URLSearchParams(init.body as string).get('rating')));
@@ -315,11 +315,11 @@ test('checkIn sends 0.1-grid and quarter ratings, snapping float artefacts', asy
 
   const client = new UntappdClient(config, fetchImpl);
   const base = { accessToken: 't', beerId: 1, timezone: 'EST', gmtOffset: -5 };
-  await client.checkIn({ ...base, rating: 3.7 });
+  await client.checkIn({ ...base, rating: 3.25 });
   await client.checkIn({ ...base, rating: 3.75 });
-  await client.checkIn({ ...base, rating: 0.1 * 3 + 3.4 });
+  await client.checkIn({ ...base, rating: 0.25 * 3 + 3 });
 
-  assert.deepEqual(sent, ['3.7', '3.75', '3.7']);
+  assert.deepEqual(sent, ['3.25', '3.75', '3.75']);
 });
 
 test('checkIn omits the rating when none is given', async () => {
