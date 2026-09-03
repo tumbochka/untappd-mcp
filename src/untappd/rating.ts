@@ -9,11 +9,11 @@ function isMultipleOf(value: number, step: number): boolean {
 }
 
 /**
- * Untappd check-in ratings run 1..5 in quarter steps (1, 1.25, 1.5, ... 5) —
- * the same grid the mobile app uses and the finest the API stores.
+ * Untappd check-in ratings run 0..5 in quarter steps (0, 0.25, ... 5) — the same
+ * grid the mobile app uses and the finest the API stores. 0 means "no rating".
  */
 export function isRatingOnGrid(value: number): boolean {
-  if (!(value >= 1 && value <= 5)) {
+  if (!(value >= 0 && value <= 5)) {
     return false;
   }
   return isMultipleOf(value, RATING_STEP);
@@ -31,10 +31,10 @@ export function formatRating(value: number): string {
 
 export const checkInRatingSchema = z
   .number()
-  .min(1)
+  .min(0)
   .max(5)
   .refine(isRatingOnGrid, {
-    message: 'Rating must be 1 to 5 in steps of 0.25 (for example 3.25, 3.5, 3.75, or 4).',
+    message: 'Rating must be 0 to 5 in steps of 0.25 (for example 3.25, 3.5, 3.75, or 4); 0 means no rating.',
   })
   .optional()
-  .describe('Rating 1 to 5, in steps of 0.25 (for example 3.75).');
+  .describe('Rating 0 to 5, in steps of 0.25 (for example 3.75). Omit or pass 0 for no rating.');
