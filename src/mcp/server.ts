@@ -379,7 +379,7 @@ export function createUntappdMcpServer(dependencies: UntappdMcpDependencies): Mc
       title: 'Check in a beer on Untappd',
       description:
         'Create a check-in for the connected Untappd account. Ask the user to confirm the beer and rating before ' +
-        'calling. rating is 1–5 in steps of 0.1, plus .25 and .75 values (e.g. 3.7 or 3.75).',
+        'calling. rating is 1–5 in quarter steps (1, 1.25, 1.5, … 5).',
       inputSchema: z.object({
         beerId: z.number().int().positive(),
         rating: checkInRatingSchema,
