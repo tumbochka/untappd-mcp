@@ -28,6 +28,7 @@ export type AppConfig = {
     clientSecret: string;
     redirectUri: string;
     userAgent: string;
+    algolia?: { appId: string; searchKey: string };
   };
   tokenEncryptionKey: Buffer;
   connectStateSecret: string;
@@ -39,6 +40,23 @@ function required(name: string, environment: NodeJS.ProcessEnv): string {
     throw new Error(`Missing required environment variable: ${name}`);
   }
   return value;
+}
+
+function optional(name: string, environment: NodeJS.ProcessEnv): string | undefined {
+  const value = environment[name]?.trim();
+  return value ? value : undefined;
+}
+
+function algoliaOverride(environment: NodeJS.ProcessEnv): { appId: string; searchKey: string } | undefined {
+  const appId = optional('UNTAPPD_ALGOLIA_APP_ID', environment);
+  const searchKey = optional('UNTAPPD_ALGOLIA_SEARCH_KEY', environment);
+  if (!appId && !searchKey) {
+    return undefined;
+  }
+  if (!appId || !searchKey) {
+    throw new Error('Set both UNTAPPD_ALGOLIA_APP_ID and UNTAPPD_ALGOLIA_SEARCH_KEY, or neither');
+  }
+  return { appId, searchKey };
 }
 
 function parsePort(value: string | undefined): number {
@@ -148,6 +166,7 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env): AppCon
       clientSecret: required('UNTAPPD_CLIENT_SECRET', environment),
       redirectUri: required('UNTAPPD_REDIRECT_URI', environment),
       userAgent: required('UNTAPPD_USER_AGENT', environment),
+      algolia: algoliaOverride(environment),
     },
     tokenEncryptionKey,
     connectStateSecret: required('CONNECT_STATE_SECRET', environment),

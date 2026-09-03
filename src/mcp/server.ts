@@ -2,6 +2,7 @@ import { McpServer } from '@modelcontextprotocol/server';
 import { z } from 'zod';
 import type { CredentialStore, UntappdCredential } from '../credentials/credentialStore.js';
 import { UntappdApiError, UntappdClient } from '../untappd/client.js';
+import { checkInRatingSchema } from '../untappd/rating.js';
 
 type UntappdMcpDependencies = {
   firebaseUid: string | undefined;
@@ -81,7 +82,10 @@ export function createUntappdMcpServer(dependencies: UntappdMcpDependencies): Mc
     {
       title: 'Search Untappd beers',
       description:
-        'Search Untappd by brewery name and beer name. Use the returned beer ID with get_beer or check_in.',
+        'Search Untappd beers by brewery and beer name. Served from Untappd’s public search index, so it does ' +
+        'not spend the shared hourly Untappd API quota (it falls back to the Untappd API only if that index is ' +
+        'unavailable). Returns { bid, beerName, brewery, style, abv, ibu, globalRating, ratingCount, slug, ' +
+        'labelUrl, aliases, source }. Use bid with get_beer, check_in, or check_user_had_beer.',
       inputSchema: z.object({
         query: z.string().min(2).max(200).describe('Prefer “Brewery Name + Beer Name”.'),
         limit: z.number().int().min(1).max(50).default(10),
@@ -313,7 +317,9 @@ export function createUntappdMcpServer(dependencies: UntappdMcpDependencies): Mc
         'Answer "has USERNAME ever checked in this beer?" for a specific beer ID (get the ID from search_beers). ' +
         'Returns their rating, how many times, and first/last dates when found. Untappd has no direct lookup, so this ' +
         'pages through the user’s distinct beers: if found is false and exhausted is false the answer is inconclusive — ' +
-        'raise maxRequests or narrow with a date range. Locked profiles that are not your Untappd friend return locked: true.',
+        'raise maxRequests or narrow with a date range. stoppedForRateLimit: true means the scan was cut short to ' +
+        'protect the shared hourly Untappd quota (check get_untappd_api_usage, then retry later). Locked profiles ' +
+        'that are not your Untappd friend return locked: true.',
       inputSchema: z.object({
         username: untappdUsername,
         beerId: z.number().int().positive().describe('Untappd beer ID from search_beers or get_beer.'),
@@ -349,14 +355,34 @@ export function createUntappdMcpServer(dependencies: UntappdMcpDependencies): Mc
   );
 
   server.registerTool(
+    'get_untappd_api_usage',
+    {
+      title: 'Get Untappd API rate-limit usage',
+      description:
+        'Report the shared Untappd API rate limit (100 requests per rolling hour, shared by every user of this ' +
+        'server) and how many remain. Makes no Untappd API call — it reads the rate-limit headers from the most ' +
+        'recent Untappd response. lastSeen.remaining is Untappd’s own account-wide figure as of lastSeen.observedAt; ' +
+        'instance.* counts only this server process. Check this before a large check_user_had_beer scan.',
+      annotations: { readOnlyHint: true },
+    },
+    async () => {
+      if (!hasScope(dependencies, 'untappd:read')) {
+        return scopeError('untappd:read');
+      }
+      return jsonResult(dependencies.untappd.getUsageSnapshot());
+    }
+  );
+
+  server.registerTool(
     'check_in',
     {
       title: 'Check in a beer on Untappd',
       description:
-        'Create a check-in for the connected Untappd account. Ask the user to confirm the beer and rating before calling.',
+        'Create a check-in for the connected Untappd account. Ask the user to confirm the beer and rating before ' +
+        'calling. rating is 1–5 in steps of 0.1, plus .25 and .75 values (e.g. 3.7 or 3.75).',
       inputSchema: z.object({
         beerId: z.number().int().positive(),
-        rating: z.number().min(1).max(5).multipleOf(0.5).optional(),
+        rating: checkInRatingSchema,
         shout: z.string().max(140).optional(),
         timezone: z.string().min(1).max(64),
         gmtOffset: z.number().min(-12).max(14),
