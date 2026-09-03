@@ -9,12 +9,35 @@ const config = {
   userAgent: 'untappd-mcp-test/0',
 };
 
-function jsonResponse(body: unknown): Response {
+function jsonResponse(body: unknown, extraHeaders: Record<string, string> = {}, status = 200): Response {
   return new Response(JSON.stringify(body), {
-    status: 200,
+    status,
+    headers: { 'content-type': 'application/json', ...extraHeaders },
+  });
+}
+
+function algoliaResponse(hits: unknown[], status = 200): Response {
+  return new Response(JSON.stringify({ hits }), {
+    status,
     headers: { 'content-type': 'application/json' },
   });
 }
+
+const algoliaHit = {
+  bid: 4473,
+  beer_name: 'Guinness Draught',
+  beer_abv: 4.2,
+  beer_ibu: 45,
+  brewery_name: 'Guinness',
+  brewery_id: 49,
+  type_name: 'Stout - Irish Dry',
+  rating_score: 3.77,
+  rating_count: 993_774,
+  beer_slug: 'guinness-guinness-draught',
+  beer_label: 'https://assets.untappd.com/site/beer_logos/beer-4473_1cbe8_sm.jpeg',
+  alias_alt: ['guinness draft', 'guines'],
+  brewery_alias: ['guiness'],
+};
 
 function userBeersPage(items: Array<{ bid: number; rating?: number; count?: number }>, totalCount: number) {
   return {
@@ -141,4 +164,262 @@ test('getUserInfo falls back to client credentials when no token is supplied', a
   assert.equal(requested?.searchParams.get('client_id'), 'client-id');
   assert.equal(requested?.searchParams.get('client_secret'), 'client-secret');
   assert.equal(requested?.searchParams.get('access_token'), null);
+});
+
+test('searchBeers queries the public Algolia index and normalizes hits', async () => {
+  let request: { url: URL; init: RequestInit } | undefined;
+  const fetchImpl = (async (input: string | URL, init: RequestInit) => {
+    request = { url: new URL(input), init };
+    return algoliaResponse([algoliaHit, { beer_name: 'no bid, dropped' }]);
+  }) as unknown as typeof fetch;
+
+  const client = new UntappdClient(config, fetchImpl);
+  const results = await client.searchBeers('Guinness Draught', 5);
+
+  assert.equal(request?.url.host, '9wbo4rq3ho-dsn.algolia.net');
+  assert.equal(request?.url.pathname, '/1/indexes/beer/query');
+  assert.equal(request?.init.method, 'POST');
+  const headers = new Headers(request?.init.headers);
+  assert.equal(headers.get('x-algolia-application-id'), '9WBO4RQ3HO');
+  assert.equal(headers.get('x-algolia-api-key'), '1d347324d67ec472bb7132c66aead485');
+  assert.deepEqual(JSON.parse(String(request?.init.body)), { query: 'Guinness Draught', hitsPerPage: 5 });
+
+  assert.equal(results.length, 1);
+  assert.deepEqual(results[0], {
+    bid: 4473,
+    beerName: 'Guinness Draught',
+    brewery: { id: 49, name: 'Guinness' },
+    style: 'Stout - Irish Dry',
+    abv: 4.2,
+    ibu: 45,
+    globalRating: 3.77,
+    ratingCount: 993_774,
+    slug: 'guinness-guinness-draught',
+    labelUrl: 'https://assets.untappd.com/site/beer_logos/beer-4473_1cbe8_sm.jpeg',
+    aliases: ['guinness draft', 'guines', 'guiness'],
+    source: 'algolia',
+  });
+});
+
+test('searchBeers does not call the Untappd API on the Algolia happy path', async () => {
+  const hosts: string[] = [];
+  const fetchImpl = (async (input: string | URL) => {
+    hosts.push(new URL(input).host);
+    return algoliaResponse([algoliaHit]);
+  }) as unknown as typeof fetch;
+
+  await new UntappdClient(config, fetchImpl).searchBeers('stout', 10);
+
+  assert.ok(!hosts.includes('api.untappd.com'));
+});
+
+for (const failure of [401, 403, 500] as const) {
+  test(`searchBeers falls back to the Untappd search API on Algolia HTTP ${failure}`, async () => {
+    const hosts: string[] = [];
+    const fetchImpl = (async (input: string | URL) => {
+      const url = new URL(input);
+      hosts.push(url.host);
+      if (url.host.endsWith('algolia.net')) {
+        return algoliaResponse([], failure);
+      }
+      return jsonResponse({
+        meta: { code: 200 },
+        response: {
+          beers: {
+            items: [
+              {
+                beer: {
+                  bid: 5,
+                  beer_name: 'Fallback Stout',
+                  beer_style: 'Stout',
+                  beer_abv: 6,
+                  beer_slug: 'fallback-stout',
+                },
+                brewery: { brewery_id: 9, brewery_name: 'Fallback Brewery' },
+              },
+            ],
+          },
+        },
+      });
+    }) as unknown as typeof fetch;
+
+    const results = await new UntappdClient(config, fetchImpl).searchBeers('stout', 10);
+
+    assert.ok(hosts.includes('api.untappd.com'));
+    assert.equal(results.length, 1);
+    assert.equal(results[0].bid, 5);
+    assert.equal(results[0].source, 'untappd-api');
+    assert.equal(results[0].style, 'Stout');
+    assert.deepEqual(results[0].aliases, []);
+  });
+}
+
+test('searchBeers falls back when the Algolia request throws', async () => {
+  let untappdCalled = false;
+  const fetchImpl = (async (input: string | URL) => {
+    const url = new URL(input);
+    if (url.host.endsWith('algolia.net')) {
+      throw new Error('network down');
+    }
+    untappdCalled = true;
+    return jsonResponse({ meta: { code: 200 }, response: { beers: { items: [] } } });
+  }) as unknown as typeof fetch;
+
+  const results = await new UntappdClient(config, fetchImpl).searchBeers('stout', 10);
+
+  assert.ok(untappdCalled);
+  assert.deepEqual(results, []);
+});
+
+test('searchBeers surfaces a genuine Untappd error from the fallback path', async () => {
+  const fetchImpl = (async (input: string | URL) => {
+    const url = new URL(input);
+    if (url.host.endsWith('algolia.net')) {
+      return algoliaResponse([], 503);
+    }
+    return jsonResponse({ meta: { code: 500, error_detail: 'boom' } }, {}, 500);
+  }) as unknown as typeof fetch;
+
+  await assert.rejects(new UntappdClient(config, fetchImpl).searchBeers('stout', 10), (error: unknown) => {
+    assert.ok(error instanceof Error);
+    assert.equal((error as { endpoint?: string }).endpoint, 'search/beer');
+    return true;
+  });
+});
+
+test('searchBeers honours configured Algolia key overrides', async () => {
+  let host: string | undefined;
+  let key: string | null | undefined;
+  const fetchImpl = (async (input: string | URL, init: RequestInit) => {
+    host = new URL(input).host;
+    key = new Headers(init.headers).get('x-algolia-api-key');
+    return algoliaResponse([algoliaHit]);
+  }) as unknown as typeof fetch;
+
+  const client = new UntappdClient(
+    { ...config, algolia: { appId: 'TESTAPP', searchKey: 'testkey' } },
+    fetchImpl
+  );
+  await client.searchBeers('stout', 5);
+
+  assert.equal(host, 'testapp-dsn.algolia.net');
+  assert.equal(key, 'testkey');
+});
+
+test('checkIn sends 0.1-grid and quarter ratings, snapping float artefacts', async () => {
+  const sent: string[] = [];
+  const fetchImpl = (async (input: string | URL, init: RequestInit) => {
+    sent.push(String(new URLSearchParams(init.body as string).get('rating')));
+    return jsonResponse({ meta: { code: 200 }, response: { checkin_id: 1 } });
+  }) as unknown as typeof fetch;
+
+  const client = new UntappdClient(config, fetchImpl);
+  const base = { accessToken: 't', beerId: 1, timezone: 'EST', gmtOffset: -5 };
+  await client.checkIn({ ...base, rating: 3.7 });
+  await client.checkIn({ ...base, rating: 3.75 });
+  await client.checkIn({ ...base, rating: 0.1 * 3 + 3.4 });
+
+  assert.deepEqual(sent, ['3.7', '3.75', '3.7']);
+});
+
+test('checkIn omits the rating when none is given', async () => {
+  let body: URLSearchParams | undefined;
+  const fetchImpl = (async (_input: string | URL, init: RequestInit) => {
+    body = new URLSearchParams(init.body as string);
+    return jsonResponse({ meta: { code: 200 }, response: {} });
+  }) as unknown as typeof fetch;
+
+  await new UntappdClient(config, fetchImpl).checkIn({
+    accessToken: 't',
+    beerId: 1,
+    timezone: 'EST',
+    gmtOffset: -5,
+  });
+
+  assert.equal(body?.has('rating'), false);
+});
+
+test('rate-limit headers are captured from successful and error responses', async () => {
+  const client = new UntappdClient(config, (async (input: string | URL) => {
+    const remaining = new URL(input).pathname.endsWith('/1') ? '97' : '0';
+    return jsonResponse(
+      { meta: { code: 200 }, response: {} },
+      { 'x-ratelimit-limit': '100', 'x-ratelimit-remaining': remaining }
+    );
+  }) as unknown as typeof fetch);
+
+  assert.equal(client.getUsageSnapshot().lastSeen, null);
+
+  await client.getBeer(1);
+  let snapshot = client.getUsageSnapshot();
+  assert.equal(snapshot.lastSeen?.limit, 100);
+  assert.equal(snapshot.lastSeen?.remaining, 97);
+  assert.equal(snapshot.lastSeen?.endpoint, 'beer/info/1');
+  assert.equal(snapshot.instance.callsSinceStart, 1);
+
+  const erroring = new UntappdClient(config, (async () =>
+    jsonResponse({ meta: { code: 429, error_detail: 'slow down' } }, {
+      'x-ratelimit-limit': '100',
+      'x-ratelimit-remaining': '0',
+    }, 429)) as unknown as typeof fetch);
+  await assert.rejects(erroring.getBeer(2));
+  assert.equal(erroring.getUsageSnapshot().lastSeen?.remaining, 0);
+  assert.equal(erroring.getUsageSnapshot().instance.callsSinceStart, 1);
+});
+
+test('getUsageSnapshot tolerates responses without rate-limit headers', async () => {
+  const client = new UntappdClient(config, (async () =>
+    jsonResponse({ meta: { code: 200 }, response: {} })) as unknown as typeof fetch);
+
+  await client.getBeer(1);
+  const snapshot = client.getUsageSnapshot();
+  assert.equal(snapshot.lastSeen, null);
+  assert.equal(snapshot.instance.callsSinceStart, 0);
+});
+
+test('findUserBeer stops early when the shared quota runs low', async () => {
+  let requests = 0;
+  const fetchImpl = (async (input: string | URL) => {
+    requests += 1;
+    const offset = Number(new URL(input).searchParams.get('offset'));
+    return jsonResponse(
+      userBeersPage(
+        Array.from({ length: 50 }, (_, i) => ({ bid: offset + i + 1 })),
+        100_000
+      ),
+      { 'x-ratelimit-limit': '100', 'x-ratelimit-remaining': '4' }
+    );
+  }) as unknown as typeof fetch;
+
+  const result = await new UntappdClient(config, fetchImpl).findUserBeer('someone', 999999, {
+    maxRequests: 20,
+  });
+
+  assert.equal(result.found, false);
+  assert.equal(result.exhausted, false);
+  assert.equal(result.stoppedForRateLimit, true);
+  assert.equal(result.requestsUsed, 1);
+  assert.equal(requests, 1);
+});
+
+test('findUserBeer keeps paging while the quota is healthy', async () => {
+  const fetchImpl = (async (input: string | URL) => {
+    const offset = Number(new URL(input).searchParams.get('offset'));
+    const bids =
+      offset === 0
+        ? Array.from({ length: 50 }, (_, i) => ({ bid: i + 1 }))
+        : Array.from({ length: 5 }, (_, i) => ({ bid: i + 51 }));
+    return jsonResponse(userBeersPage(bids, 55), {
+      'x-ratelimit-limit': '100',
+      'x-ratelimit-remaining': '80',
+    });
+  }) as unknown as typeof fetch;
+
+  const result = await new UntappdClient(config, fetchImpl).findUserBeer('someone', 999, {
+    maxRequests: 20,
+  });
+
+  assert.equal(result.exhausted, true);
+  assert.equal(result.stoppedForRateLimit, false);
+  assert.equal(result.scannedDistinctBeers, 55);
 });

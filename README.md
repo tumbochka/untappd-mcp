@@ -12,11 +12,12 @@ A multi-user [Model Context Protocol](https://modelcontextprotocol.io/) server f
 - Short-lived, audience-bound opaque access tokens and rotating refresh tokens
 - Firebase Auth Google sign-in and a secure server-side browser session
 - Revocable, time-limited personal access tokens for Claude while its custom-connector OAuth callback is unavailable
-- `search_beers` and `get_beer`
+- `search_beers` (via Untappd's public search index — no shared-quota cost) and `get_beer`
 - `get_my_profile`, `get_my_wishlist`, and `get_my_beers`
 - `get_user_profile`, `get_user_beers`, and `get_user_checkins` for any Untappd username
 - `check_user_had_beer` — "has USERNAME ever checked in this beer?", with their rating and first/last dates
-- `check_in`, with rating and message validation
+- `get_untappd_api_usage` — the shared Untappd hourly rate-limit budget and how much is left
+- `check_in`, with 0.1-step ratings (plus `.25` / `.75`) and message validation
 - Untappd authorization-code connect flow: `GET /connect/untappd`
 - AES-256-GCM encryption at rest for credentials in Firestore collection `untappd_credentials`
 - Firebase ID-token verification on every authenticated server request
@@ -170,11 +171,26 @@ MCP_ALLOWED_ORIGINS=https://claude.ai,https://chatgpt.com
 MCP_PERSONAL_ACCESS_TOKEN_TTL_SECONDS=15552000
 # Optional: enables only /chatgpt/mcp, never changes /mcp
 AUTH0_ISSUER=https://YOUR_AUTH0_TENANT.REGION.auth0.com/
+# Optional: override Untappd's public Algolia search keys only if they rotate.
+# Set both or neither; low-sensitivity, plain env is fine.
+UNTAPPD_ALGOLIA_APP_ID=
+UNTAPPD_ALGOLIA_SEARCH_KEY=
 ```
 
 `PUBLIC_BASE_URL` and `UNTAPPD_REDIRECT_URI` must use the exact final HTTPS origin. Add that hostname to **Firebase Console → Authentication → Settings → Authorized domains** before using the OAuth browser login. The browser config fields are Firebase public configuration, not credentials.
 
 Create Firestore TTL policies for `expiresAt` in these collection groups: `mcp_oauth_transactions`, `mcp_oauth_authorization_codes`, `mcp_oauth_access_tokens`, `mcp_oauth_refresh_tokens`, and `mcp_personal_access_tokens`. TTL reduces retained metadata; server-side expiry checks remain mandatory.
+
+## Untappd API rate limit
+
+Untappd allows **100 API requests per rolling hour per app key**, shared by every user of this server. To stay within it:
+
+- `search_beers` runs against Untappd's public Algolia beer index and does **not** spend the quota. It falls back to the Untappd `search/beer` API (which does) only when Algolia returns an error; every fallback logs `"message":"algolia_search_fallback"`.
+- Every real Untappd API response is recorded from its `X-RateLimit-*` headers and emitted as a structured `"message":"untappd_api_call"` log line (`rateLimitRemaining`, per-instance counters) — suitable for a Cloud Logging metric and a low-remaining alert.
+- `get_untappd_api_usage` returns the latest `X-RateLimit-Remaining` (Untappd's account-wide figure) plus this process's own counters, without making a call.
+- `check_user_had_beer` pages the target user's distinct beers (up to `maxRequests` × 50) and aborts early with `stoppedForRateLimit: true` once the shared remaining budget drops to ~10.
+
+Cloud Run runs several instances, each with its own `instance.*` counters, so those undercount true shared usage; `lastSeen.remaining` is authoritative whenever a recent call ran on the serving instance.
 
 ## Security notes
 
@@ -185,4 +201,4 @@ Create Firestore TTL policies for `expiresAt` in these collection groups: `mcp_o
 - MCP access tokens are short-lived and audience-bound to this server. Untappd tokens are never accepted at `/mcp`.
 - Personal access tokens are displayed only once, stored as hashes, expire after 180 days by default, and can be revoked from `/tokens`.
 - `check_in` is intentionally marked non-idempotent. The calling model must get user confirmation before invoking it.
-- `untappd:write` is required for `check_in`; all other current tools require `untappd:read`.
+- `untappd:write` is required for `check_in`; all other current tools (including `get_untappd_api_usage`) require `untappd:read`.
