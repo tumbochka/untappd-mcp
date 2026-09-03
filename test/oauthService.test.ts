@@ -472,3 +472,68 @@ test('OAuth refuses to fetch client metadata from an untrusted host', async () =
     globalThis.fetch = realFetch;
   }
 });
+
+test('OAuth resolves a per-connection Codex CIMD document (nested /oauth/<surface>/<id>/client.json)', async () => {
+  const clientId = 'https://chatgpt.com/oauth/codex/UkDmn2yFP-9y/client.json';
+  const doc = {
+    client_id: clientId,
+    client_name: 'Codex',
+    redirect_uris: ['http://127.0.0.1/callback/UkDmn2yFP-9y', 'http://localhost/callback/UkDmn2yFP-9y'],
+    token_endpoint_auth_method: 'none',
+    grant_types: ['authorization_code', 'refresh_token'],
+    response_types: ['code'],
+  };
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (async () =>
+    new Response(JSON.stringify(doc), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    })) as typeof fetch;
+  try {
+    const oauth = new McpOAuthService(new MemoryOAuthStore(), new URL('https://untappd-mcp.example.com'), 900, 3600);
+    const request = await oauth.validateAuthorizationRequest(
+      new URLSearchParams({
+        response_type: 'code',
+        client_id: clientId,
+        redirect_uri: 'http://127.0.0.1:58922/callback/UkDmn2yFP-9y',
+        resource: oauth.resource,
+        scope: 'untappd:read untappd:write',
+        code_challenge: pkceChallenge('k'.repeat(64)),
+        code_challenge_method: 'S256',
+      })
+    );
+    assert.equal(request.client.clientName, 'Codex');
+    assert.equal(request.redirectUri, 'http://127.0.0.1:58922/callback/UkDmn2yFP-9y');
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+test('OAuth rejects an unrecognised CIMD-shaped client_id without crashing', async () => {
+  const realFetch = globalThis.fetch;
+  let fetched = false;
+  globalThis.fetch = (async () => {
+    fetched = true;
+    return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } });
+  }) as typeof fetch;
+  try {
+    const oauth = new McpOAuthService(new MemoryOAuthStore(), new URL('https://untappd-mcp.example.com'), 900, 3600);
+    await assert.rejects(
+      oauth.validateAuthorizationRequest(
+        new URLSearchParams({
+          response_type: 'code',
+          client_id: 'https://evil.example/a/b/client.json',
+          redirect_uri: 'https://evil.example/cb',
+          resource: oauth.resource,
+          scope: 'untappd:read',
+          code_challenge: pkceChallenge('l'.repeat(64)),
+          code_challenge_method: 'S256',
+        })
+      ),
+      /Unknown client_id/
+    );
+    assert.equal(fetched, false);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});

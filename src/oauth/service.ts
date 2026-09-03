@@ -170,10 +170,10 @@ function isStringArray(value: unknown): value is string[] {
 }
 
 // CIMD (client-id-metadata-document) hosts we are willing to fetch a client.json
-// from. The client_id URL must match one of these exactly; the fetched document
-// is then the authority on that client's redirect URIs. OpenAI publishes one
-// generic document plus per-surface ones (e.g. /oauth/codex/client.json for the
-// Codex CLI), all under chatgpt.com.
+// from. The client_id URL must match one of these; the fetched document is then
+// the authority on that client's redirect URIs. OpenAI publishes one generic
+// document plus per-surface and per-connection ones under chatgpt.com/oauth/,
+// e.g. /oauth/codex/client.json and /oauth/codex/<connection-id>/client.json.
 const trustedCimdClientNames = new Map<string, string>([
   [claudeClientMetadataUrl, 'Claude'],
   [chatGptClientMetadataUrl, 'ChatGPT'],
@@ -190,7 +190,7 @@ function isOpenAiSurfaceCimd(clientId: string): boolean {
     url.origin === 'https://chatgpt.com' &&
     !url.search &&
     !url.hash &&
-    /^\/oauth\/[A-Za-z0-9._~-]+\/client\.json$/.test(url.pathname)
+    /^\/oauth\/(?:[A-Za-z0-9._~-]+\/)+client\.json$/.test(url.pathname)
   );
 }
 
