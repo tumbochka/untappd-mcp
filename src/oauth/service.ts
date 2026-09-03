@@ -17,7 +17,6 @@ const supportedScopes = new Set<string>(MCP_SCOPES);
 const claudeClientMetadataUrl = 'https://claude.ai/oauth/mcp-oauth-client-metadata';
 const claudeCallbackUrl = 'https://claude.ai/api/mcp/auth_callback';
 const chatGptClientMetadataUrl = 'https://chatgpt.com/oauth/client.json';
-const chatGptCallbackUrl = 'https://chatgpt.com/connector_platform_oauth_redirect';
 const chatGptJwksUrl = 'https://chatgpt.com/oauth/jwks.json';
 const clientAssertionType = 'urn:ietf:params:oauth:client-assertion-type:jwt-bearer';
 const chatGptJwks = createRemoteJWKSet(new URL(chatGptJwksUrl));
@@ -87,6 +86,12 @@ function parseScopes(value: string | null): McpScope[] {
   return Array.from(new Set(scopes)) as McpScope[];
 }
 
+const loopbackHostnames = new Set(['127.0.0.1', '[::1]', 'localhost']);
+
+function isLoopbackRedirect(url: URL): boolean {
+  return url.protocol === 'http:' && loopbackHostnames.has(url.hostname);
+}
+
 function parseRedirectUri(value: string): string {
   let url: URL;
   try {
@@ -94,11 +99,45 @@ function parseRedirectUri(value: string): string {
   } catch {
     throw new OAuthProtocolError('invalid_request', 'redirect_uri must be an absolute URL');
   }
-  const isLoopback = url.protocol === 'http:' && ['127.0.0.1', '::1', 'localhost'].includes(url.hostname);
-  if ((!isLoopback && url.protocol !== 'https:') || url.hash || url.username || url.password) {
+  if ((!isLoopbackRedirect(url) && url.protocol !== 'https:') || url.hash || url.username || url.password) {
     throw new OAuthProtocolError('invalid_request', 'redirect_uri must use HTTPS or a loopback HTTP address');
   }
   return url.toString();
+}
+
+/**
+ * RFC 8252 §7.3: a native client registers a loopback redirect (often without a
+ * port) but listens on an ephemeral port, so the port must be ignored when
+ * matching a loopback redirect against the registered set. Non-loopback URIs
+ * must still match exactly.
+ */
+function redirectUriIsRegistered(registered: string[], requested: string): boolean {
+  if (registered.includes(requested)) {
+    return true;
+  }
+  let request: URL;
+  try {
+    request = new URL(requested);
+  } catch {
+    return false;
+  }
+  if (!isLoopbackRedirect(request)) {
+    return false;
+  }
+  return registered.some(value => {
+    let entry: URL;
+    try {
+      entry = new URL(value);
+    } catch {
+      return false;
+    }
+    return (
+      isLoopbackRedirect(entry) &&
+      entry.hostname === request.hostname &&
+      entry.pathname === request.pathname &&
+      entry.search === request.search
+    );
+  });
 }
 
 function requirePkceChallenge(value: string | null): string {
@@ -130,65 +169,39 @@ function isStringArray(value: unknown): value is string[] {
   return Array.isArray(value) && value.every(item => typeof item === 'string');
 }
 
-type TrustedClientMetadata = {
-  clientId: string;
-  redirectUri: string;
-  fallbackName: string;
-};
-
-const trustedClientMetadata = new Map<string, TrustedClientMetadata>([
-  [
-    claudeClientMetadataUrl,
-    {
-      clientId: claudeClientMetadataUrl,
-      redirectUri: claudeCallbackUrl,
-      fallbackName: 'Claude',
-    },
-  ],
-  [
-    chatGptClientMetadataUrl,
-    {
-      clientId: chatGptClientMetadataUrl,
-      redirectUri: chatGptCallbackUrl,
-      fallbackName: 'ChatGPT',
-    },
-  ],
+// CIMD (client-id-metadata-document) hosts we are willing to fetch a client.json
+// from. The client_id URL must match one of these exactly; the fetched document
+// is then the authority on that client's redirect URIs. OpenAI publishes one
+// generic document plus per-surface ones (e.g. /oauth/codex/client.json for the
+// Codex CLI), all under chatgpt.com.
+const trustedCimdClientNames = new Map<string, string>([
+  [claudeClientMetadataUrl, 'Claude'],
+  [chatGptClientMetadataUrl, 'ChatGPT'],
 ]);
 
-function chatGptCallbackSpecificMetadata(clientId: string): TrustedClientMetadata | null {
+function isOpenAiSurfaceCimd(clientId: string): boolean {
   let url: URL;
   try {
     url = new URL(clientId);
   } catch {
-    return null;
+    return false;
   }
-
-  // Without authorization-response issuer identification, ChatGPT uses a
-  // callback-specific CIMD URL and a matching callback URL. Accept only that
-  // exact, HTTPS-only ChatGPT URL shape so client metadata cannot become an
-  // arbitrary outbound fetch target.
-  if (url.origin !== 'https://chatgpt.com' || url.search || url.hash) {
-    return null;
-  }
-  const match = url.pathname.match(/^\/oauth\/([A-Za-z0-9._~-]+)\/client\.json$/);
-  if (!match) {
-    return null;
-  }
-
-  const callbackId = match[1];
-  return {
-    clientId: url.toString(),
-    redirectUri: `https://chatgpt.com/connector/oauth/${callbackId}`,
-    fallbackName: 'ChatGPT',
-  };
+  return (
+    url.origin === 'https://chatgpt.com' &&
+    !url.search &&
+    !url.hash &&
+    /^\/oauth\/[A-Za-z0-9._~-]+\/client\.json$/.test(url.pathname)
+  );
 }
 
-function trustedClientMetadataFor(clientId: string): TrustedClientMetadata | null {
-  return trustedClientMetadata.get(clientId) ?? chatGptCallbackSpecificMetadata(clientId);
+function trustedCimdClientName(clientId: string): string | null {
+  return (
+    trustedCimdClientNames.get(clientId) ?? (isOpenAiSurfaceCimd(clientId) ? 'ChatGPT' : null)
+  );
 }
 
 function isChatGptCimdClient(clientId: string): boolean {
-  return clientId === chatGptClientMetadataUrl || chatGptCallbackSpecificMetadata(clientId) !== null;
+  return clientId === chatGptClientMetadataUrl || isOpenAiSurfaceCimd(clientId);
 }
 
 async function verifyChatGptClientAssertion(
@@ -214,14 +227,14 @@ async function verifyChatGptClientAssertion(
 }
 
 async function resolveTrustedClientMetadata(clientId: string): Promise<OAuthClient | null> {
-  const expected = trustedClientMetadataFor(clientId);
-  if (!expected) {
+  const fallbackName = trustedCimdClientName(clientId);
+  if (!fallbackName) {
     return null;
   }
 
   let response: Response;
   try {
-    response = await fetch(expected.clientId, {
+    response = await fetch(clientId, {
       headers: { accept: 'application/json' },
       redirect: 'error',
       signal: AbortSignal.timeout(5_000),
@@ -248,10 +261,18 @@ async function resolveTrustedClientMetadata(clientId: string): Promise<OAuthClie
     : typeof data.token_endpoint_auth_method === 'string'
       ? [data.token_endpoint_auth_method]
       : [];
+  // The fetched document is the authority on this client's redirect URIs.
+  let redirectUris: string[] = [];
+  try {
+    if (isStringArray(data.redirect_uris)) {
+      redirectUris = Array.from(new Set(data.redirect_uris.map(parseRedirectUri)));
+    }
+  } catch {
+    redirectUris = [];
+  }
   if (
-    data.client_id !== expected.clientId ||
-    !isStringArray(data.redirect_uris) ||
-    !data.redirect_uris.includes(expected.redirectUri) ||
+    data.client_id !== clientId ||
+    redirectUris.length === 0 ||
     !isStringArray(data.grant_types) ||
     !data.grant_types.includes('authorization_code') ||
     !isStringArray(data.response_types) ||
@@ -266,8 +287,8 @@ async function resolveTrustedClientMetadata(clientId: string): Promise<OAuthClie
     clientName:
       typeof data.client_name === 'string' && data.client_name.trim()
         ? data.client_name.trim().slice(0, 120)
-        : expected.fallbackName,
-    redirectUris: [expected.redirectUri],
+        : fallbackName,
+    redirectUris,
     createdAt: nowSeconds(),
   };
 }
@@ -355,7 +376,7 @@ export class McpOAuthService {
       throw new OAuthProtocolError('unauthorized_client', 'Unknown client_id');
     }
     const redirectUri = parseRedirectUri(required(parameters.get('redirect_uri'), 'redirect_uri'));
-    if (!client.redirectUris.includes(redirectUri)) {
+    if (!redirectUriIsRegistered(client.redirectUris, redirectUri)) {
       throw new OAuthProtocolError('invalid_request', 'redirect_uri is not registered for this client');
     }
     const resource = required(parameters.get('resource'), 'resource');
