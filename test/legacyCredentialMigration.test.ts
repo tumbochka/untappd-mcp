@@ -15,6 +15,15 @@ class MemoryCredentials implements CredentialStore {
     return this.values.get(firebaseUid) ?? null;
   }
 
+  async getByUntappdUserName(userName: string): Promise<UntappdCredential | null> {
+    for (const credential of this.values.values()) {
+      if (credential.untappdUserName?.toLowerCase() === userName.trim().toLowerCase()) {
+        return credential;
+      }
+    }
+    return null;
+  }
+
   async save(firebaseUid: string, credential: UntappdCredential): Promise<void> {
     this.values.set(firebaseUid, credential);
   }

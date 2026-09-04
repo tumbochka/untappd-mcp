@@ -532,3 +532,66 @@ test('listRecentVenues stops once it has enough distinct venues', async () => {
   assert.equal(result.venues.length, 10);
   assert.equal(requests, 1);
 });
+
+test('checkOwnBeer reports a had beer with the token owner rating and count', async () => {
+  let requested: URL | undefined;
+  const fetchImpl = (async (input: string | URL) => {
+    requested = new URL(input);
+    return jsonResponse({
+      meta: { code: 200 },
+      response: {
+        beer: {
+          bid: 4473,
+          beer_name: 'Guinness Draught',
+          brewery: { brewery_name: 'Guinness' },
+          auth_rating: 3.5,
+          wish_list: true,
+          stats: { total_user_count: 1107460, user_count: 2 },
+        },
+      },
+    });
+  }) as unknown as typeof fetch;
+
+  const result = await new UntappdClient(config, fetchImpl).checkOwnBeer(4473, 'user-token');
+
+  assert.equal(requested?.pathname, '/v4/beer/info/4473');
+  assert.equal(requested?.searchParams.get('access_token'), 'user-token');
+  assert.deepEqual(result, {
+    beerId: 4473,
+    beerName: 'Guinness Draught',
+    breweryName: 'Guinness',
+    hadIt: true,
+    userRating: 3.5,
+    userCheckinCount: 2,
+    onWishlist: true,
+  });
+});
+
+test('checkOwnBeer reports a not-had beer', async () => {
+  const fetchImpl = (async () =>
+    jsonResponse({
+      meta: { code: 200 },
+      response: {
+        beer: { bid: 131332, beer_name: 'Kentucky Brunch', auth_rating: 0, wish_list: false, stats: { user_count: 0 } },
+      },
+    })) as unknown as typeof fetch;
+
+  const result = await new UntappdClient(config, fetchImpl).checkOwnBeer(131332, 't');
+
+  assert.equal(result.hadIt, false);
+  assert.equal(result.userRating, null);
+  assert.equal(result.userCheckinCount, 0);
+  assert.equal(result.onWishlist, false);
+});
+
+test('checkOwnBeer treats a rating with no stats block as had', async () => {
+  const fetchImpl = (async () =>
+    jsonResponse({
+      meta: { code: 200 },
+      response: { beer: { bid: 1, beer_name: 'X', auth_rating: 4 } },
+    })) as unknown as typeof fetch;
+
+  const result = await new UntappdClient(config, fetchImpl).checkOwnBeer(1, 't');
+  assert.equal(result.hadIt, true);
+  assert.equal(result.userRating, 4);
+});

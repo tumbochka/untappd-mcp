@@ -238,6 +238,16 @@ type RawCheckinItem = {
       };
 };
 
+export type OwnBeerCheck = {
+  beerId: number;
+  beerName: string | null;
+  breweryName: string | null;
+  hadIt: boolean;
+  userRating: number | null;
+  userCheckinCount: number | null;
+  onWishlist: boolean;
+};
+
 type RateLimitSnapshot = {
   limit: number;
   remaining: number;
@@ -379,6 +389,35 @@ export class UntappdClient {
 
   async getBeer(beerId: number, accessToken?: string): Promise<unknown> {
     return this.get(`beer/info/${beerId}`, {}, accessToken);
+  }
+
+  /**
+   * `beer/info` called with a user's token carries that user's own relationship
+   * to the beer: `stats.user_count` (their check-in count) and `auth_rating`
+   * (their rating). One request answers "has this token owner had this beer?".
+   */
+  async checkOwnBeer(beerId: number, accessToken: string): Promise<OwnBeerCheck> {
+    const response = (await this.get(`beer/info/${beerId}`, {}, accessToken)) as {
+      beer?: {
+        beer_name?: string;
+        auth_rating?: number;
+        wish_list?: boolean;
+        stats?: { user_count?: number };
+        brewery?: { brewery_name?: string };
+      };
+    };
+    const beer = response.beer ?? {};
+    const userCheckinCount = numberOrNull(beer.stats?.user_count);
+    const userRating = ratingOrNull(beer.auth_rating);
+    return {
+      beerId,
+      beerName: stringOrNull(beer.beer_name),
+      breweryName: stringOrNull(beer.brewery?.brewery_name),
+      hadIt: (userCheckinCount ?? 0) > 0 || userRating !== null,
+      userRating,
+      userCheckinCount,
+      onWishlist: beer.wish_list === true,
+    };
   }
 
   async getCurrentUser(accessToken: string): Promise<unknown> {

@@ -14,6 +14,7 @@ A multi-user [Model Context Protocol](https://modelcontextprotocol.io/) server f
 - `search_beers` (via Untappd's public search index — no shared-quota cost) and `get_beer`
 - `get_my_profile`, `get_my_wishlist`, `get_my_beers`, and `get_my_recent_venues`
 - `get_user_profile`, `get_user_beers`, and `get_user_checkins` for any Untappd username
+- `check_i_had_beer` — "have I checked in this beer?" for the connected account, in one API call
 - `check_user_had_beer` — "has USERNAME ever checked in this beer?", with their rating and first/last dates
 - `get_untappd_api_usage` — the shared Untappd hourly rate-limit budget and how much is left
 - `check_in`, with 0–5 quarter-step (0.25) ratings, an optional venue (`foursquareId` + coordinates from `get_my_recent_venues`), and message validation
@@ -146,7 +147,9 @@ Untappd allows **100 API requests per rolling hour per app key**, shared by ever
 - `search_beers` runs against Untappd's public Algolia beer index and does **not** spend the quota. It falls back to the Untappd `search/beer` API (which does) only when Algolia returns an error; every fallback logs `"message":"algolia_search_fallback"`.
 - Every real Untappd API response is recorded from its `X-RateLimit-*` headers and emitted as a structured `"message":"untappd_api_call"` log line (`rateLimitRemaining`, per-instance counters) — suitable for a Cloud Logging metric and a low-remaining alert.
 - `get_untappd_api_usage` returns the latest `X-RateLimit-Remaining` (Untappd's account-wide figure) plus this process's own counters, without making a call.
-- `check_user_had_beer` pages the target user's distinct beers (up to `maxRequests` × 50) and aborts early with `stoppedForRateLimit: true` once the shared remaining budget drops to ~10.
+- `check_i_had_beer`, and `check_user_had_beer` when the target is another connected user, answer in a single `beer/info` call. Otherwise `check_user_had_beer` pages the target's distinct beers (up to `maxRequests` × 50) and aborts early with `stoppedForRateLimit: true` once the shared remaining budget drops to ~10.
+
+The single-call path for `check_user_had_beer` uses the target user's own Untappd token, so a connected user can see another connected user's had-status for a specific beer even if that user's Untappd profile is private and they are not friends. It is limited to accounts connected to this server.
 
 Cloud Run runs several instances, each with its own `instance.*` counters, so those undercount true shared usage; `lastSeen.remaining` is authoritative whenever a recent call ran on the serving instance.
 

@@ -1,7 +1,7 @@
 import { McpServer } from '@modelcontextprotocol/server';
 import { z } from 'zod';
 import type { CredentialStore, UntappdCredential } from '../credentials/credentialStore.js';
-import { UntappdApiError, UntappdClient } from '../untappd/client.js';
+import { UntappdApiError, UntappdClient, type OwnBeerCheck } from '../untappd/client.js';
 import { checkInRatingSchema } from '../untappd/rating.js';
 
 type UntappdMcpDependencies = {
@@ -21,6 +21,35 @@ const untappdUsername = z
 
 function normalizeUsername(value: string): string {
   return value.replace(/^@/, '');
+}
+
+/** Adapt a single-call beer/info check into the check_user_had_beer result shape. */
+function connectedUserHadBeer(username: string, beerId: number, own: OwnBeerCheck) {
+  return {
+    username,
+    beerId,
+    found: own.hadIt,
+    exhausted: !own.hadIt,
+    locked: false,
+    stoppedForRateLimit: false,
+    scannedDistinctBeers: null,
+    totalDistinctBeers: null,
+    requestsUsed: 1,
+    source: 'connected-user-token' as const,
+    match: own.hadIt
+      ? {
+          beerId,
+          beerName: own.beerName,
+          breweryName: own.breweryName,
+          userRating: own.userRating,
+          checkinCount: own.userCheckinCount,
+          onWishlist: own.onWishlist,
+          firstHadAt: null,
+          lastHadAt: null,
+          firstCheckinId: null,
+        }
+      : null,
+  };
 }
 
 function jsonResult(data: unknown) {
@@ -124,6 +153,35 @@ export function createUntappdMcpServer(dependencies: UntappdMcpDependencies): Mc
           ? await dependencies.credentialStore.get(dependencies.firebaseUid)
           : null;
         return jsonResult(await dependencies.untappd.getBeer(beerId, credential?.accessToken));
+      } catch (error) {
+        return handleUntappdError(error);
+      }
+    }
+  );
+
+  server.registerTool(
+    'check_i_had_beer',
+    {
+      title: 'Check whether I have had a beer',
+      description:
+        'Answer "have I ever checked in this beer?" for the Untappd account connected to this MCP user. ' +
+        'Costs a single Untappd API call — always prefer this over check_user_had_beer with your own username. ' +
+        'Returns hadIt, your rating, your check-in count, and whether it is on your wishlist. It does not carry ' +
+        'first/last check-in dates; use get_user_checkins for those.',
+      inputSchema: z.object({
+        beerId: z.number().int().positive().describe('Untappd beer ID from search_beers or get_beer.'),
+      }),
+      annotations: { readOnlyHint: true },
+    },
+    async ({ beerId }) => {
+      if (!hasScope(dependencies, 'untappd:read')) {
+        return scopeError('untappd:read');
+      }
+      try {
+        const result = await withCredential(dependencies, credential =>
+          dependencies.untappd.checkOwnBeer(beerId, credential.accessToken)
+        );
+        return result === null ? untappdNotConnected(dependencies) : jsonResult(result);
       } catch (error) {
         return handleUntappdError(error);
       }
@@ -315,11 +373,12 @@ export function createUntappdMcpServer(dependencies: UntappdMcpDependencies): Mc
       title: 'Check whether a user has had a beer',
       description:
         'Answer "has USERNAME ever checked in this beer?" for a specific beer ID (get the ID from search_beers). ' +
-        'Returns their rating, how many times, and first/last dates when found. Untappd has no direct lookup, so this ' +
-        'pages through the user’s distinct beers: if found is false and exhausted is false the answer is inconclusive — ' +
-        'raise maxRequests or narrow with a date range. stoppedForRateLimit: true means the scan was cut short to ' +
-        'protect the shared hourly Untappd quota (check get_untappd_api_usage, then retry later). Locked profiles ' +
-        'that are not your Untappd friend return locked: true.',
+        'If USERNAME belongs to someone who connected their Untappd account to this server, it is answered in one ' +
+        'call (source: "connected-user-token"). Otherwise Untappd has no direct lookup, so it pages through the ' +
+        'user’s distinct beers: found=false with exhausted=false is inconclusive — raise maxRequests or narrow with ' +
+        'a date range. stoppedForRateLimit=true means the scan was cut short to protect the shared hourly Untappd ' +
+        'quota (check get_untappd_api_usage, then retry later). Locked profiles that are not your Untappd friend ' +
+        'return locked: true. For your own username use check_i_had_beer instead.',
       inputSchema: z.object({
         username: untappdUsername,
         beerId: z.number().int().positive().describe('Untappd beer ID from search_beers or get_beer.'),
@@ -339,9 +398,17 @@ export function createUntappdMcpServer(dependencies: UntappdMcpDependencies): Mc
       if (!hasScope(dependencies, 'untappd:read')) {
         return scopeError('untappd:read');
       }
+      const target = normalizeUsername(username);
       try {
+        const connected = await dependencies.credentialStore
+          .getByUntappdUserName(target)
+          .catch(() => null);
+        if (connected?.accessToken) {
+          const own = await dependencies.untappd.checkOwnBeer(beerId, connected.accessToken);
+          return jsonResult(connectedUserHadBeer(target, beerId, own));
+        }
         return jsonResult(
-          await dependencies.untappd.findUserBeer(normalizeUsername(username), beerId, {
+          await dependencies.untappd.findUserBeer(target, beerId, {
             accessToken: await callerAccessToken(),
             maxRequests,
             startDate,
