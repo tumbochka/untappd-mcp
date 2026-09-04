@@ -12,11 +12,11 @@ A multi-user [Model Context Protocol](https://modelcontextprotocol.io/) server f
 - Firebase Auth Google sign-in and a secure server-side browser session
 - Revocable, time-limited personal access tokens as a header-auth alternative to the OAuth flow
 - `search_beers` (via Untappd's public search index — no shared-quota cost) and `get_beer`
-- `get_my_profile`, `get_my_wishlist`, and `get_my_beers`
+- `get_my_profile`, `get_my_wishlist`, `get_my_beers`, and `get_my_recent_venues`
 - `get_user_profile`, `get_user_beers`, and `get_user_checkins` for any Untappd username
 - `check_user_had_beer` — "has USERNAME ever checked in this beer?", with their rating and first/last dates
 - `get_untappd_api_usage` — the shared Untappd hourly rate-limit budget and how much is left
-- `check_in`, with 0–5 quarter-step (0.25) ratings and message validation
+- `check_in`, with 0–5 quarter-step (0.25) ratings, an optional venue (`foursquareId` + coordinates from `get_my_recent_venues`), and message validation
 - Untappd authorization-code connect flow: `GET /connect/untappd`
 - AES-256-GCM encryption at rest for credentials in Firestore collection `untappd_credentials`
 - Firebase ID-token verification on every authenticated server request

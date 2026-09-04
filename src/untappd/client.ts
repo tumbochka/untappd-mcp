@@ -200,6 +200,44 @@ export type UserBeerLookup = {
   } | null;
 };
 
+export type RecentVenue = {
+  untappdVenueId: number;
+  /** The Foursquare v2 id to pass to check_in; null if Untappd has no Foursquare mapping for the venue. */
+  foursquareId: string | null;
+  name: string | null;
+  city: string | null;
+  state: string | null;
+  country: string | null;
+  lat: number | null;
+  lng: number | null;
+  lastCheckinAt: string | null;
+  checkinCount: number;
+};
+
+export type RecentVenueList = {
+  venues: RecentVenue[];
+  scannedCheckins: number;
+  requestsUsed: number;
+};
+
+type RawCheckinItem = {
+  created_at?: string;
+  venue?:
+    | []
+    | {
+        venue_id?: number;
+        venue_name?: string;
+        foursquare?: { foursquare_id?: string };
+        location?: {
+          venue_city?: string;
+          venue_state?: string;
+          venue_country?: string;
+          lat?: number;
+          lng?: number;
+        };
+      };
+};
+
 type RateLimitSnapshot = {
   limit: number;
   remaining: number;
@@ -406,6 +444,70 @@ export class UntappdClient {
   }
 
   /**
+   * Distinct venues the token owner has checked in at recently, newest first.
+   * Untappd has no venue search, so this is how a client picks a `foursquare_id`
+   * for a location check-in without asking the user to type an id.
+   */
+  async listRecentVenues(
+    accessToken: string,
+    options: { limit?: number; maxRequests?: number } = {}
+  ): Promise<RecentVenueList> {
+    const wantVenues = Math.max(1, Math.min(options.limit ?? 15, 50));
+    const maxRequests = Math.max(1, Math.min(options.maxRequests ?? 4, 10));
+    const venues = new Map<string, RecentVenue>();
+    let maxId: number | undefined;
+    let scannedCheckins = 0;
+    let requestsUsed = 0;
+
+    for (let page = 0; page < maxRequests; page += 1) {
+      const response = (await this.getUserCheckins('', { limit: 25, maxId }, accessToken)) as {
+        pagination?: { max_id?: number | false };
+        checkins?: { items?: RawCheckinItem[] };
+      };
+      requestsUsed += 1;
+      const items = response.checkins?.items ?? [];
+      scannedCheckins += items.length;
+
+      for (const item of items) {
+        const venue = item.venue;
+        if (!venue || Array.isArray(venue) || typeof venue.venue_id !== 'number') {
+          continue;
+        }
+        const key = String(venue.venue_id);
+        const existing = venues.get(key);
+        if (existing) {
+          existing.checkinCount += 1;
+          continue;
+        }
+        venues.set(key, {
+          untappdVenueId: venue.venue_id,
+          foursquareId: stringOrNull(venue.foursquare?.foursquare_id),
+          name: stringOrNull(venue.venue_name),
+          city: stringOrNull(venue.location?.venue_city),
+          state: stringOrNull(venue.location?.venue_state),
+          country: stringOrNull(venue.location?.venue_country),
+          lat: numberOrNull(venue.location?.lat),
+          lng: numberOrNull(venue.location?.lng),
+          lastCheckinAt: stringOrNull(item.created_at),
+          checkinCount: 1,
+        });
+      }
+
+      const nextMaxId = response.pagination?.max_id;
+      if (venues.size >= wantVenues || items.length < 25 || typeof nextMaxId !== 'number') {
+        break;
+      }
+      maxId = nextMaxId;
+    }
+
+    return {
+      venues: Array.from(venues.values()).slice(0, wantVenues),
+      scannedCheckins,
+      requestsUsed,
+    };
+  }
+
+  /**
    * Untappd exposes no "has user X had beer Y" endpoint, so page through the
    * user's distinct beers (newest first) until the beer id is found or the list
    * is exhausted. `maxRequests` caps the paging to protect the hourly API quota,
@@ -534,6 +636,9 @@ export class UntappdClient {
     shout?: string;
     timezone: string;
     gmtOffset: number;
+    foursquareId?: string;
+    geolat?: number;
+    geolng?: number;
   }): Promise<unknown> {
     const url = new URL('checkin/add', UntappdClient.apiBaseUrl);
     url.searchParams.set('access_token', input.accessToken);
@@ -547,6 +652,15 @@ export class UntappdClient {
     }
     if (input.shout) {
       body.set('shout', input.shout);
+    }
+    if (input.foursquareId) {
+      body.set('foursquare_id', input.foursquareId);
+    }
+    if (input.geolat !== undefined) {
+      body.set('geolat', String(input.geolat));
+    }
+    if (input.geolng !== undefined) {
+      body.set('geolng', String(input.geolng));
     }
     const payload = await this.fetchJson<unknown>(
       url,
