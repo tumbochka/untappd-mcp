@@ -423,3 +423,112 @@ test('findUserBeer keeps paging while the quota is healthy', async () => {
   assert.equal(result.stoppedForRateLimit, false);
   assert.equal(result.scannedDistinctBeers, 55);
 });
+
+test('checkIn attaches a venue when foursquareId and coordinates are given', async () => {
+  let body: URLSearchParams | undefined;
+  const fetchImpl = (async (_input: string | URL, init: RequestInit) => {
+    body = new URLSearchParams(init.body as string);
+    return jsonResponse({ meta: { code: 200 }, response: { checkin_id: 1 } });
+  }) as unknown as typeof fetch;
+
+  await new UntappdClient(config, fetchImpl).checkIn({
+    accessToken: 't',
+    beerId: 5,
+    timezone: 'Europe/Kyiv',
+    gmtOffset: 3,
+    foursquareId: '4c345f93452620a1e6f3240f',
+    geolat: 46.4659424,
+    geolng: 30.7313004,
+  });
+
+  assert.equal(body?.get('foursquare_id'), '4c345f93452620a1e6f3240f');
+  assert.equal(body?.get('geolat'), '46.4659424');
+  assert.equal(body?.get('geolng'), '30.7313004');
+});
+
+test('checkIn omits venue params when foursquareId is not given', async () => {
+  let body: URLSearchParams | undefined;
+  const fetchImpl = (async (_input: string | URL, init: RequestInit) => {
+    body = new URLSearchParams(init.body as string);
+    return jsonResponse({ meta: { code: 200 }, response: {} });
+  }) as unknown as typeof fetch;
+
+  await new UntappdClient(config, fetchImpl).checkIn({ accessToken: 't', beerId: 5, timezone: 'EST', gmtOffset: -5 });
+
+  assert.equal(body?.has('foursquare_id'), false);
+  assert.equal(body?.has('geolat'), false);
+});
+
+function checkinFeedPage(
+  venues: Array<{ id: number; name: string; fsq?: string } | null>,
+  maxId: number | false
+) {
+  return {
+    meta: { code: 200 },
+    response: {
+      pagination: { max_id: maxId },
+      checkins: {
+        items: venues.map((v, i) => ({
+          created_at: `day-${i}`,
+          venue: v
+            ? {
+                venue_id: v.id,
+                venue_name: v.name,
+                foursquare: v.fsq ? { foursquare_id: v.fsq } : undefined,
+                location: { venue_city: 'Kyiv', venue_country: 'Ukraine', lat: 50.4, lng: 30.5 },
+              }
+            : [],
+        })),
+      },
+    },
+  };
+}
+
+test('listRecentVenues dedupes venues, counts repeats, and skips venueless check-ins', async () => {
+  const fetchImpl = (async (input: string | URL) => {
+    const maxId = new URL(input).searchParams.get('max_id');
+    if (!maxId) {
+      return jsonResponse(
+        checkinFeedPage(
+          [
+            { id: 1, name: 'The Pub', fsq: 'a'.repeat(24) },
+            null,
+            { id: 1, name: 'The Pub', fsq: 'a'.repeat(24) },
+            { id: 2, name: 'Taproom', fsq: 'b'.repeat(24) },
+            ...Array.from({ length: 21 }, () => null),
+          ],
+          999
+        )
+      );
+    }
+    return jsonResponse(checkinFeedPage([{ id: 3, name: 'Bar', fsq: 'c'.repeat(24) }], false));
+  }) as unknown as typeof fetch;
+
+  const result = await new UntappdClient(config, fetchImpl).listRecentVenues('token', { maxRequests: 5 });
+
+  assert.equal(result.venues.length, 3);
+  assert.equal(result.requestsUsed, 2);
+  assert.equal(result.scannedCheckins, 26);
+  const pub = result.venues.find(v => v.untappdVenueId === 1);
+  assert.equal(pub?.checkinCount, 2);
+  assert.equal(pub?.foursquareId, 'a'.repeat(24));
+  assert.equal(pub?.lastCheckinAt, 'day-0');
+});
+
+test('listRecentVenues stops once it has enough distinct venues', async () => {
+  let requests = 0;
+  const fetchImpl = (async () => {
+    requests += 1;
+    return jsonResponse(
+      checkinFeedPage(
+        Array.from({ length: 25 }, (_, i) => ({ id: requests * 100 + i, name: `V${i}`, fsq: 'd'.repeat(24) })),
+        999
+      )
+    );
+  }) as unknown as typeof fetch;
+
+  const result = await new UntappdClient(config, fetchImpl).listRecentVenues('token', { limit: 10, maxRequests: 5 });
+
+  assert.equal(result.venues.length, 10);
+  assert.equal(requests, 1);
+});

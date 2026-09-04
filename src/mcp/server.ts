@@ -374,24 +374,69 @@ export function createUntappdMcpServer(dependencies: UntappdMcpDependencies): Mc
   );
 
   server.registerTool(
+    'get_my_recent_venues',
+    {
+      title: 'List venues I recently checked in at',
+      description:
+        'Distinct venues the connected Untappd account checked in at recently, newest first, each with the ' +
+        'foursquareId and coordinates to pass to check_in. Untappd has no venue search, so this is how to check ' +
+        'in "at a place" — but it only covers venues already used on Untappd.',
+      inputSchema: z.object({
+        limit: z.number().int().min(1).max(50).default(15).describe('Max distinct venues to return.'),
+        maxRequests: z
+          .number()
+          .int()
+          .min(1)
+          .max(10)
+          .default(4)
+          .describe('Max check-in feed pages to scan (25 check-ins each).'),
+      }),
+      annotations: { readOnlyHint: true },
+    },
+    async ({ limit, maxRequests }) => {
+      if (!hasScope(dependencies, 'untappd:read')) {
+        return scopeError('untappd:read');
+      }
+      try {
+        const result = await withCredential(dependencies, credential =>
+          dependencies.untappd.listRecentVenues(credential.accessToken, { limit, maxRequests })
+        );
+        return result === null ? untappdNotConnected(dependencies) : jsonResult(result);
+      } catch (error) {
+        return handleUntappdError(error);
+      }
+    }
+  );
+
+  server.registerTool(
     'check_in',
     {
       title: 'Check in a beer on Untappd',
       description:
         'Create a check-in for the connected Untappd account. Ask the user to confirm the beer and rating before ' +
-        'calling. rating is 0–5 in quarter steps (0, 0.25, … 5); 0 or omitted means no rating.',
+        'calling. rating is 0–5 in quarter steps (0, 0.25, … 5); 0 or omitted means no rating. To check in "at" a ' +
+        'venue, pass foursquareId + geolat + geolng from get_my_recent_venues.',
       inputSchema: z.object({
         beerId: z.number().int().positive(),
         rating: checkInRatingSchema,
         shout: z.string().max(140).optional(),
         timezone: z.string().min(1).max(64),
         gmtOffset: z.number().min(-12).max(14),
+        foursquareId: z
+          .string()
+          .regex(/^[0-9a-f]{24}$/i, 'Foursquare venue id (24 hex chars) from get_my_recent_venues.')
+          .optional(),
+        geolat: z.number().min(-90).max(90).optional().describe('Venue latitude — required with foursquareId.'),
+        geolng: z.number().min(-180).max(180).optional().describe('Venue longitude — required with foursquareId.'),
       }),
       annotations: { destructiveHint: false, idempotentHint: false },
     },
-    async ({ beerId, rating, shout, timezone, gmtOffset }) => {
+    async ({ beerId, rating, shout, timezone, gmtOffset, foursquareId, geolat, geolng }) => {
       if (!hasScope(dependencies, 'untappd:write')) {
         return scopeError('untappd:write');
+      }
+      if (foursquareId && (geolat === undefined || geolng === undefined)) {
+        return errorResult('INVALID_ARGUMENT', 'geolat and geolng are required when foursquareId is set.');
       }
       try {
         const checkin = await withCredential(dependencies, credential =>
@@ -402,6 +447,9 @@ export function createUntappdMcpServer(dependencies: UntappdMcpDependencies): Mc
             shout,
             timezone,
             gmtOffset,
+            foursquareId,
+            geolat,
+            geolng,
           })
         );
         return checkin === null
