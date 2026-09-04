@@ -43,6 +43,7 @@ export type ConsumedRefreshToken =
 
 export interface OAuthStore {
   createClient(client: OAuthClient): Promise<void>;
+  upsertClient(client: OAuthClient): Promise<void>;
   getClient(clientId: string): Promise<OAuthClient | null>;
   createAuthorizationTransaction(transaction: AuthorizationTransaction): Promise<void>;
   consumeAuthorizationTransaction(id: string, nowSeconds: number): Promise<AuthorizationTransaction | null>;
@@ -151,22 +152,32 @@ export function hashOAuthValue(value: string): string {
 export class FirestoreOAuthStore implements OAuthStore {
   private readonly firestore = getFirestore();
 
+  // Dynamically-registered client ids are `mcp_<base64url>` and are safe as
+  // Firestore document ids. CIMD client ids are URLs (they contain "/", which
+  // doc() reads as a nested path), so those are stored under a hash instead.
+  private clientDocId(clientId: string): string {
+    return /^mcp_[A-Za-z0-9_-]+$/.test(clientId) ? clientId : hashOAuthValue(clientId);
+  }
+
   async createClient(client: OAuthClient): Promise<void> {
-    await this.clients().doc(client.clientId).create({
+    await this.clients().doc(this.clientDocId(client.clientId)).create({
+      ...client,
+      createdAt: timestamp(client.createdAt),
+    });
+  }
+
+  async upsertClient(client: OAuthClient): Promise<void> {
+    await this.clients().doc(this.clientDocId(client.clientId)).set({
       ...client,
       createdAt: timestamp(client.createdAt),
     });
   }
 
   async getClient(clientId: string): Promise<OAuthClient | null> {
-    // Dynamically registered client ids are `mcp_<base64url>`. Anything else
-    // (e.g. an unrecognised CIMD URL, which contains "/") is not a stored client
-    // and must not be passed to Firestore's doc() — a slash there is read as a
-    // nested path and throws.
-    if (!/^[A-Za-z0-9_-]{1,256}$/.test(clientId)) {
+    if (!clientId) {
       return null;
     }
-    const snapshot = await this.clients().doc(clientId).get();
+    const snapshot = await this.clients().doc(this.clientDocId(clientId)).get();
     return snapshot.exists ? clientFromData(snapshot.data() as Record<string, unknown>) : null;
   }
 
