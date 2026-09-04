@@ -595,3 +595,31 @@ test('checkOwnBeer treats a rating with no stats block as had', async () => {
   assert.equal(result.hadIt, true);
   assert.equal(result.userRating, 4);
 });
+
+test('getUserFriends passes username, limit and offset to user/friends', async () => {
+  let requested: URL | undefined;
+  const fetchImpl = (async (input: string | URL) => {
+    requested = new URL(input);
+    return jsonResponse({ meta: { code: 200 }, response: { count: 0, items: [] } });
+  }) as unknown as typeof fetch;
+
+  await new UntappdClient(config, fetchImpl).getUserFriends('a.user', { limit: 25, offset: 50 }, 'tok');
+
+  assert.equal(requested?.pathname, '/v4/user/friends/a.user');
+  assert.equal(requested?.searchParams.get('limit'), '25');
+  assert.equal(requested?.searchParams.get('offset'), '50');
+  assert.equal(requested?.searchParams.get('access_token'), 'tok');
+});
+
+test('getUserFriends targets the authenticated user when username is empty', async () => {
+  let requested: URL | undefined;
+  const fetchImpl = (async (input: string | URL) => {
+    requested = new URL(input);
+    return jsonResponse({ meta: { code: 200 }, response: { count: 0, items: [] } });
+  }) as unknown as typeof fetch;
+
+  await new UntappdClient(config, fetchImpl).getUserFriends('', { limit: 10, offset: 0 }, 'tok');
+
+  assert.equal(requested?.pathname, '/v4/user/friends/');
+  assert.equal(requested?.searchParams.get('access_token'), 'tok');
+});

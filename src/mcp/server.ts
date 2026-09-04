@@ -368,6 +368,42 @@ export function createUntappdMcpServer(dependencies: UntappdMcpDependencies): Mc
   );
 
   server.registerTool(
+    'get_user_friends',
+    {
+      title: 'Get a user’s Untappd friends',
+      description:
+        'List a given Untappd user’s friends (25 per page, page with offset). Untappd has no single-friend lookup, ' +
+        'so to check whether two users are friends, page through this list. Omit username for the connected account.',
+      inputSchema: z.object({
+        username: untappdUsername.optional(),
+        limit: z.number().int().min(1).max(25).default(25),
+        offset: z.number().int().min(0).default(0),
+      }),
+      annotations: { readOnlyHint: true },
+    },
+    async ({ username, limit, offset }) => {
+      if (!hasScope(dependencies, 'untappd:read')) {
+        return scopeError('untappd:read');
+      }
+      const token = await callerAccessToken();
+      if (!username && !token) {
+        return untappdNotConnected(dependencies);
+      }
+      try {
+        return jsonResult(
+          await dependencies.untappd.getUserFriends(
+            username ? normalizeUsername(username) : '',
+            { limit, offset },
+            token
+          )
+        );
+      } catch (error) {
+        return handleUntappdError(error);
+      }
+    }
+  );
+
+  server.registerTool(
     'check_user_had_beer',
     {
       title: 'Check whether a user has had a beer',

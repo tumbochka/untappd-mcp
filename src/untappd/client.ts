@@ -482,6 +482,18 @@ export class UntappdClient {
     return this.get(`user/checkins/${encodeURIComponent(username)}`, query, accessToken);
   }
 
+  async getUserFriends(
+    username: string,
+    options: { limit: number; offset: number },
+    accessToken?: string
+  ): Promise<unknown> {
+    return this.get(
+      `user/friends/${encodeURIComponent(username)}`,
+      { limit: String(options.limit), offset: String(options.offset) },
+      accessToken
+    );
+  }
+
   /**
    * Distinct venues the token owner has checked in at recently, newest first.
    * Untappd has no venue search, so this is how a client picks a `foursquare_id`
