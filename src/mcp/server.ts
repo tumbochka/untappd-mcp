@@ -593,5 +593,39 @@ export function createUntappdMcpServer(dependencies: UntappdMcpDependencies): Mc
     }
   );
 
+  server.registerTool(
+    'comment_checkin',
+    {
+      title: 'Comment on an Untappd check-in',
+      description:
+        'Post a comment to an Untappd check-in as the connected account. Get the checkin_id from ' +
+        'get_user_checkins or a check-in feed, show the exact comment to the user, and ask for confirmation ' +
+        'before calling.',
+      inputSchema: z.object({
+        checkinId: z.number().int().positive().describe('Untappd checkin_id to comment on.'),
+        comment: z
+          .string()
+          .trim()
+          .min(1, 'Comment cannot be empty.')
+          .max(140, 'Untappd comments are limited to 140 characters.')
+          .describe('Comment text to post, maximum 140 characters.'),
+      }),
+      annotations: { destructiveHint: false, idempotentHint: false },
+    },
+    async ({ checkinId, comment }) => {
+      if (!hasScope(dependencies, 'untappd:write')) {
+        return scopeError('untappd:write');
+      }
+      try {
+        const result = await withCredential(dependencies, credential =>
+          dependencies.untappd.commentOnCheckin(credential.accessToken, checkinId, comment)
+        );
+        return result === null ? untappdNotConnected(dependencies) : jsonResult(result);
+      } catch (error) {
+        return handleUntappdError(error);
+      }
+    }
+  );
+
   return server;
 }
