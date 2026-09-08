@@ -623,3 +623,35 @@ test('getUserFriends targets the authenticated user when username is empty', asy
   assert.equal(requested?.pathname, '/v4/user/friends/');
   assert.equal(requested?.searchParams.get('access_token'), 'tok');
 });
+
+test('toastCheckin posts to checkin/toast and reports an added toast', async () => {
+  let request: { url: URL; method?: string } | undefined;
+  const fetchImpl = (async (input: string | URL, init: RequestInit) => {
+    request = { url: new URL(input), method: init.method };
+    return jsonResponse({
+      meta: { code: 200 },
+      response: { result: 'success', like_id: 987, toasts: { auth_toast: true, total_count: 4 } },
+    });
+  }) as unknown as typeof fetch;
+
+  const result = await new UntappdClient(config, fetchImpl).toastCheckin('tok', 12345);
+
+  assert.equal(request?.url.pathname, '/v4/checkin/toast/12345');
+  assert.equal(request?.method, 'POST');
+  assert.equal(request?.url.searchParams.get('access_token'), 'tok');
+  assert.deepEqual(result, { checkinId: 12345, nowToasted: true, action: 'added', toastCount: 4 });
+});
+
+test('toastCheckin reports a removed toast when auth_toast is false and no like_id', async () => {
+  const fetchImpl = (async () =>
+    jsonResponse({
+      meta: { code: 200 },
+      response: { result: 'success', toasts: { auth_toast: false, total_count: 3 } },
+    })) as unknown as typeof fetch;
+
+  const result = await new UntappdClient(config, fetchImpl).toastCheckin('tok', 999);
+
+  assert.equal(result.nowToasted, false);
+  assert.equal(result.action, 'removed');
+  assert.equal(result.toastCount, 3);
+});
