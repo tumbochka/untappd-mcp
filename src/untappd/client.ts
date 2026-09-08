@@ -248,6 +248,14 @@ export type OwnBeerCheck = {
   onWishlist: boolean;
 };
 
+export type CheckinToastResult = {
+  checkinId: number;
+  /** True if the token owner now has a toast on the check-in, false if it was just removed. */
+  nowToasted: boolean;
+  action: 'added' | 'removed';
+  toastCount: number | null;
+};
+
 type RateLimitSnapshot = {
   limit: number;
   remaining: number;
@@ -723,6 +731,30 @@ export class UntappdClient {
       'checkin/add'
     );
     return payload.response;
+  }
+
+  /**
+   * `checkin/toast` is a toggle: the same call adds a toast if the token owner
+   * hasn't toasted the check-in and removes it if they have. The response
+   * reports the resulting state.
+   */
+  async toastCheckin(accessToken: string, checkinId: number): Promise<CheckinToastResult> {
+    const url = new URL(`checkin/toast/${checkinId}`, UntappdClient.apiBaseUrl);
+    url.searchParams.set('access_token', accessToken);
+    const payload = await this.fetchJson<{
+      result?: string;
+      like_id?: number;
+      toasts?: { auth_toast?: boolean; total_count?: number };
+    }>(url, { method: 'POST' }, 'checkin/toast');
+    const response = payload.response;
+    const nowToasted =
+      response.toasts?.auth_toast === true || typeof response.like_id === 'number';
+    return {
+      checkinId,
+      nowToasted,
+      action: nowToasted ? 'added' : 'removed',
+      toastCount: numberOrNull(response.toasts?.total_count),
+    };
   }
 
   /**

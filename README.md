@@ -18,6 +18,7 @@ A multi-user [Model Context Protocol](https://modelcontextprotocol.io/) server f
 - `check_user_had_beer` — "has USERNAME ever checked in this beer?", with their rating and first/last dates
 - `get_untappd_api_usage` — the shared Untappd hourly rate-limit budget and how much is left
 - `check_in`, with 0–5 quarter-step (0.25) ratings, an optional venue (`foursquareId` + coordinates from `get_my_recent_venues`), and message validation
+- `toast_checkin` — toggle a toast on someone's check-in
 - Untappd authorization-code connect flow: `GET /connect/untappd`
 - AES-256-GCM encryption at rest for credentials in Firestore collection `untappd_credentials`
 - Firebase ID-token verification on every authenticated server request
@@ -161,5 +162,5 @@ Cloud Run runs several instances, each with its own `instance.*` counters, so th
 - OAuth authorization codes are one-time, expire after one minute, and require PKCE S256. Redirect URIs are exact-match registered values.
 - MCP access tokens are short-lived and audience-bound to this server. Untappd tokens are never accepted at `/mcp`.
 - Personal access tokens are displayed only once, stored as hashes, expire after 180 days by default, and can be revoked from `/tokens`.
-- `check_in` is intentionally marked non-idempotent. The calling model must get user confirmation before invoking it.
-- `untappd:write` is required for `check_in`; all other current tools (including `get_untappd_api_usage`) require `untappd:read`.
+- `check_in` and `toast_checkin` are intentionally marked non-idempotent (`toast_checkin` toggles). The calling model must get user confirmation before invoking them.
+- `untappd:write` is required for `check_in` and `toast_checkin`; all other current tools (including `get_untappd_api_usage`) require `untappd:read`.

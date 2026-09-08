@@ -564,5 +564,34 @@ export function createUntappdMcpServer(dependencies: UntappdMcpDependencies): Mc
     }
   );
 
+  server.registerTool(
+    'toast_checkin',
+    {
+      title: 'Toast a check-in on Untappd',
+      description:
+        'Toggle a toast on someone’s check-in as the connected Untappd account. The same call adds a toast if you ' +
+        'have not toasted it and removes it if you have — the result’s `action` and `nowToasted` say which happened. ' +
+        'Get the checkin_id from get_user_checkins or a check-in feed. Confirm intent with the user first; to know ' +
+        'the current state beforehand, read `toasts.auth_toast` on that check-in.',
+      inputSchema: z.object({
+        checkinId: z.number().int().positive().describe('Untappd checkin_id to toast or un-toast.'),
+      }),
+      annotations: { destructiveHint: false, idempotentHint: false },
+    },
+    async ({ checkinId }) => {
+      if (!hasScope(dependencies, 'untappd:write')) {
+        return scopeError('untappd:write');
+      }
+      try {
+        const result = await withCredential(dependencies, credential =>
+          dependencies.untappd.toastCheckin(credential.accessToken, checkinId)
+        );
+        return result === null ? untappdNotConnected(dependencies) : jsonResult(result);
+      } catch (error) {
+        return handleUntappdError(error);
+      }
+    }
+  );
+
   return server;
 }
