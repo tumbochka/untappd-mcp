@@ -655,3 +655,33 @@ test('toastCheckin reports a removed toast when auth_toast is false and no like_
   assert.equal(result.action, 'removed');
   assert.equal(result.toastCount, 3);
 });
+
+test('commentOnCheckin posts the comment and returns the created comment details', async () => {
+  let request: { url: URL; method?: string; body?: URLSearchParams } | undefined;
+  const fetchImpl = (async (input: string | URL, init: RequestInit) => {
+    request = {
+      url: new URL(input),
+      method: init.method,
+      body: new URLSearchParams(init.body as string),
+    };
+    return jsonResponse({
+      meta: { code: 200 },
+      response: {
+        comment: { comment_id: 77, comment: 'Prost!', created_at: 'Mon, 08 Sep 2026 17:00:00 +0000' },
+      },
+    });
+  }) as unknown as typeof fetch;
+
+  const result = await new UntappdClient(config, fetchImpl).commentOnCheckin('tok', 12345, 'Prost!');
+
+  assert.equal(request?.url.pathname, '/v4/checkin/addcomment/12345');
+  assert.equal(request?.method, 'POST');
+  assert.equal(request?.url.searchParams.get('access_token'), 'tok');
+  assert.equal(request?.body?.get('comment'), 'Prost!');
+  assert.deepEqual(result, {
+    checkinId: 12345,
+    commentId: 77,
+    comment: 'Prost!',
+    createdAt: 'Mon, 08 Sep 2026 17:00:00 +0000',
+  });
+});

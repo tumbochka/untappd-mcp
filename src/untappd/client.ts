@@ -256,6 +256,13 @@ export type CheckinToastResult = {
   toastCount: number | null;
 };
 
+export type CheckinCommentResult = {
+  checkinId: number;
+  commentId: number | null;
+  comment: string;
+  createdAt: string | null;
+};
+
 type RateLimitSnapshot = {
   limit: number;
   remaining: number;
@@ -754,6 +761,37 @@ export class UntappdClient {
       nowToasted,
       action: nowToasted ? 'added' : 'removed',
       toastCount: numberOrNull(response.toasts?.total_count),
+    };
+  }
+
+  /**
+   * Add a comment to a check-in as the token owner. Untappd allows at most
+   * 140 characters per comment.
+   */
+  async commentOnCheckin(
+    accessToken: string,
+    checkinId: number,
+    comment: string
+  ): Promise<CheckinCommentResult> {
+    const url = new URL(`checkin/addcomment/${checkinId}`, UntappdClient.apiBaseUrl);
+    url.searchParams.set('access_token', accessToken);
+    const payload = await this.fetchJson<{
+      comment?: { comment_id?: number; comment?: string; created_at?: string };
+    }>(
+      url,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({ comment }),
+      },
+      'checkin/addcomment'
+    );
+    const created = payload.response.comment;
+    return {
+      checkinId,
+      commentId: numberOrNull(created?.comment_id),
+      comment: stringOrNull(created?.comment) ?? comment,
+      createdAt: stringOrNull(created?.created_at),
     };
   }
 
