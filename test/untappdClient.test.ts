@@ -685,3 +685,53 @@ test('commentOnCheckin posts the comment and returns the created comment details
     createdAt: 'Mon, 08 Sep 2026 17:00:00 +0000',
   });
 });
+
+test('getUsageSnapshot keeps rate-limit state separate per access token', async () => {
+  const client = new UntappdClient(config, (async (input: string | URL) => {
+    const token = new URL(input).searchParams.get('access_token');
+    const remaining = token === 'alice' ? '90' : token === 'bob' ? '3' : '100';
+    return jsonResponse(
+      { meta: { code: 200 }, response: { beer: {} } },
+      { 'x-ratelimit-limit': '100', 'x-ratelimit-remaining': remaining }
+    );
+  }) as unknown as typeof fetch);
+
+  await client.getBeer(1, 'alice');
+  await client.getBeer(2, 'bob');
+
+  assert.equal(client.getUsageSnapshot('alice').lastSeen?.remaining, 90);
+  assert.equal(client.getUsageSnapshot('bob').lastSeen?.remaining, 3);
+  // a token this process has never used with Untappd, and the client-credentials pool
+  assert.equal(client.getUsageSnapshot('carol').lastSeen, null);
+  assert.equal(client.getUsageSnapshot().lastSeen, null);
+  // instance counters still cover every account
+  assert.equal(client.getUsageSnapshot('alice').instance.callsSinceStart, 2);
+});
+
+test('findUserBeer early-stop uses the scanning token’s remaining, not another token’s', async () => {
+  const client = new UntappdClient(config, (async (input: string | URL) => {
+    const url = new URL(input);
+    const token = url.searchParams.get('access_token');
+    // "healthy" has plenty of budget; "drained" is at the floor
+    const remaining = token === 'drained' ? '2' : '95';
+    if (url.pathname.startsWith('/v4/user/beers/')) {
+      const offset = Number(url.searchParams.get('offset'));
+      return jsonResponse(
+        userBeersPage(Array.from({ length: 50 }, (_, i) => ({ bid: offset + i + 1 })), 100_000),
+        { 'x-ratelimit-limit': '100', 'x-ratelimit-remaining': remaining }
+      );
+    }
+    return jsonResponse({ meta: { code: 200 }, response: {} }, {
+      'x-ratelimit-limit': '100',
+      'x-ratelimit-remaining': remaining,
+    });
+  }) as unknown as typeof fetch);
+
+  const drained = await client.findUserBeer('x', 999999, { maxRequests: 5, accessToken: 'drained' });
+  assert.equal(drained.stoppedForRateLimit, true);
+  assert.equal(drained.requestsUsed, 1);
+
+  const healthy = await client.findUserBeer('y', 999999, { maxRequests: 3, accessToken: 'healthy' });
+  assert.equal(healthy.stoppedForRateLimit, false);
+  assert.equal(healthy.requestsUsed, 3);
+});
