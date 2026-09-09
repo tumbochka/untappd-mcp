@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { formatRating } from './rating.js';
 
 export type AlgoliaConfig = { appId: string; searchKey: string };
@@ -288,9 +289,12 @@ export type UntappdApiUsageSnapshot = {
 };
 
 const USAGE_NOTE =
-  'limit and remaining are Untappd account-wide values shared by every user of this server ' +
-  '(100 per rolling hour, per Untappd app key). instance.* counters cover only this server ' +
-  'process and reset on restart or scale events.';
+  'Untappd rate-limits authenticated calls per access token (100 per rolling hour). lastSeen is the ' +
+  "budget for the calling account's own token, from its most recent Untappd response; unauthenticated " +
+  'calls (client credentials) share a separate pool. instance.* counters cover every account served by ' +
+  'this server process and reset on restart or scale events.';
+
+const APP_TOKEN_POOL = 'client-credentials';
 
 export class UntappdClient {
   private static readonly apiBaseUrl = 'https://api.untappd.com/v4/';
@@ -301,7 +305,8 @@ export class UntappdClient {
   private readonly algoliaAppId: string;
   private readonly algoliaSearchKey: string;
 
-  private lastRateLimit: RateLimitSnapshot | null = null;
+  /** Rate-limit headers keyed per access token (Untappd's 100/hour is per token). */
+  private readonly rateLimitByToken = new Map<string, RateLimitSnapshot>();
   private readonly callTimestamps: number[] = [];
   private totalCallsSinceStart = 0;
   private readonly startedAt = Date.now();
@@ -661,11 +666,8 @@ export class UntappdClient {
         };
       }
 
-      if (
-        this.lastRateLimit &&
-        this.lastRateLimit.remaining <= rateLimitFloor &&
-        page < maxRequests - 1
-      ) {
+      const tokenUsage = this.rateLimitByToken.get(this.rateLimitKey(options.accessToken));
+      if (tokenUsage && tokenUsage.remaining <= rateLimitFloor && page < maxRequests - 1) {
         return {
           username,
           beerId,
@@ -799,17 +801,18 @@ export class UntappdClient {
    * The latest Untappd rate-limit headers plus this process's own call counters.
    * Reads local state only — makes no Untappd request.
    */
-  getUsageSnapshot(): UntappdApiUsageSnapshot {
+  getUsageSnapshot(accessToken?: string): UntappdApiUsageSnapshot {
     const now = Date.now();
     const cutoff = now - UntappdClient.rateWindowMs;
+    const seen = this.rateLimitByToken.get(this.rateLimitKey(accessToken)) ?? null;
     return {
-      lastSeen: this.lastRateLimit
+      lastSeen: seen
         ? {
-            limit: this.lastRateLimit.limit,
-            remaining: this.lastRateLimit.remaining,
-            observedAt: new Date(this.lastRateLimit.observedAt).toISOString(),
-            ageSeconds: Math.round((now - this.lastRateLimit.observedAt) / 1000),
-            endpoint: this.lastRateLimit.endpoint,
+            limit: seen.limit,
+            remaining: seen.remaining,
+            observedAt: new Date(seen.observedAt).toISOString(),
+            ageSeconds: Math.round((now - seen.observedAt) / 1000),
+            endpoint: seen.endpoint,
           }
         : null,
       instance: {
@@ -841,7 +844,13 @@ export class UntappdClient {
     return payload.response;
   }
 
-  private recordRateLimit(endpoint: string, headers: Headers): void {
+  private rateLimitKey(accessToken: string | null | undefined): string {
+    return accessToken
+      ? createHash('sha256').update(accessToken).digest('hex').slice(0, 16)
+      : APP_TOKEN_POOL;
+  }
+
+  private recordRateLimit(url: URL, endpoint: string, headers: Headers): void {
     const limitRaw = headers.get('x-ratelimit-limit');
     const remainingRaw = headers.get('x-ratelimit-remaining');
     if (limitRaw === null || remainingRaw === null) {
@@ -853,17 +862,19 @@ export class UntappdClient {
       return;
     }
     const now = Date.now();
+    const key = this.rateLimitKey(url.searchParams.get('access_token'));
     this.totalCallsSinceStart += 1;
     this.callTimestamps.push(now);
     const cutoff = now - UntappdClient.rateWindowMs;
     while (this.callTimestamps.length > 0 && this.callTimestamps[0] < cutoff) {
       this.callTimestamps.shift();
     }
-    this.lastRateLimit = { limit, remaining, observedAt: now, endpoint };
+    this.rateLimitByToken.set(key, { limit, remaining, observedAt: now, endpoint });
     console.log(
       JSON.stringify({
         message: 'untappd_api_call',
         endpoint,
+        tokenPool: key,
         rateLimit: limit,
         rateLimitRemaining: remaining,
         instanceCallsLastHour: this.callTimestamps.length,
@@ -881,7 +892,7 @@ export class UntappdClient {
         ...init.headers,
       },
     });
-    this.recordRateLimit(endpoint, response.headers);
+    this.recordRateLimit(url, endpoint, response.headers);
     const payload = (await response.json().catch(() => null)) as UntappdEnvelope<T> | null;
     const apiCode = payload?.meta?.code;
     if (!response.ok || (apiCode !== undefined && apiCode >= 400)) {

@@ -144,16 +144,16 @@ Create Firestore TTL policies for `expiresAt` in these collection groups: `mcp_o
 
 ## Untappd API rate limit
 
-Untappd allows **100 API requests per rolling hour per app key**, shared by every user of this server. To stay within it:
+Untappd rate-limits authenticated calls **per access token — 100 per rolling hour** (unauthenticated client-credential calls share a separate pool). To stay within it:
 
 - `search_beers` runs against Untappd's public Algolia beer index and does **not** spend the quota. It falls back to the Untappd `search/beer` API (which does) only when Algolia returns an error; every fallback logs `"message":"algolia_search_fallback"`.
-- Every real Untappd API response is recorded from its `X-RateLimit-*` headers and emitted as a structured `"message":"untappd_api_call"` log line (`rateLimitRemaining`, per-instance counters) — suitable for a Cloud Logging metric and a low-remaining alert.
-- `get_untappd_api_usage` returns the latest `X-RateLimit-Remaining` (Untappd's account-wide figure) plus this process's own counters, without making a call.
-- `check_i_had_beer`, and `check_user_had_beer` when the target is another connected user, answer in a single `beer/info` call. Otherwise `check_user_had_beer` pages the target's distinct beers (up to `maxRequests` × 50) and aborts early with `stoppedForRateLimit: true` once the shared remaining budget drops to ~10.
+- Every real Untappd API response is recorded from its `X-RateLimit-*` headers, **keyed by the access token that made the call**, and emitted as a structured `"message":"untappd_api_call"` log line (`tokenPool`, `rateLimitRemaining`, per-instance counters).
+- `get_untappd_api_usage` returns `lastSeen` — the `X-RateLimit-Remaining` for **the connected account's own token** (null until this server process has called Untappd with it) — plus `instance.*` counters that cover every account served by this process. Makes no API call.
+- `check_i_had_beer`, and `check_user_had_beer` when the target is another connected user, answer in a single `beer/info` call. Otherwise `check_user_had_beer` pages the target's distinct beers (up to `maxRequests` × 50) and aborts early with `stoppedForRateLimit: true` once **the scanning token's** remaining budget drops to ~10.
 
 The single-call path for `check_user_had_beer` uses the target user's own Untappd token, so a connected user can see another connected user's had-status for a specific beer even if that user's Untappd profile is private and they are not friends. It is limited to accounts connected to this server.
 
-Cloud Run runs several instances, each with its own `instance.*` counters, so those undercount true shared usage; `lastSeen.remaining` is authoritative whenever a recent call ran on the serving instance.
+Cloud Run runs several instances, each keeping its own in-memory rate-limit state, so `lastSeen` is only populated on instances that have recently made a call with that token.
 
 ## Security notes
 

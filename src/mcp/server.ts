@@ -462,17 +462,18 @@ export function createUntappdMcpServer(dependencies: UntappdMcpDependencies): Mc
     {
       title: 'Get Untappd API rate-limit usage',
       description:
-        'Report the shared Untappd API rate limit (100 requests per rolling hour, shared by every user of this ' +
-        'server) and how many remain. Makes no Untappd API call — it reads the rate-limit headers from the most ' +
-        'recent Untappd response. lastSeen.remaining is Untappd’s own account-wide figure as of lastSeen.observedAt; ' +
-        'instance.* counts only this server process. Check this before a large check_user_had_beer scan.',
+        'Report the Untappd API rate limit (100 requests per rolling hour, per access token) for the connected ' +
+        'account and how many remain. Makes no Untappd API call — it reads the rate-limit headers from that ' +
+        'account’s most recent Untappd response. lastSeen.remaining is that token’s budget as of ' +
+        'lastSeen.observedAt (null if this server process has not called Untappd with it yet); instance.* counts ' +
+        'every account served by this server process. Check this before a large check_user_had_beer scan.',
       annotations: { readOnlyHint: true },
     },
     async () => {
       if (!hasScope(dependencies, 'untappd:read')) {
         return scopeError('untappd:read');
       }
-      return jsonResult(dependencies.untappd.getUsageSnapshot());
+      return jsonResult(dependencies.untappd.getUsageSnapshot(await callerAccessToken()));
     }
   );
 
