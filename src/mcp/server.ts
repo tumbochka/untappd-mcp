@@ -404,6 +404,36 @@ export function createUntappdMcpServer(dependencies: UntappdMcpDependencies): Mc
   );
 
   server.registerTool(
+    'get_my_friend_feed',
+    {
+      title: 'Get my friends’ check-in feed',
+      description:
+        'The combined recent check-in activity of everyone the connected Untappd account follows (Untappd’s ' +
+        '"checkin/recent" — the friend feed, not your own check-ins). Page backwards with maxId (the oldest ' +
+        'checkin_id seen). Use get_my_beers or get_user_checkins for a single account’s own history.',
+      inputSchema: z.object({
+        limit: z.number().int().min(1).max(50).default(25),
+        maxId: z.number().int().positive().optional().describe('Return check-ins older than this checkin_id.'),
+        minId: z.number().int().positive().optional().describe('Return check-ins newer than this checkin_id.'),
+      }),
+      annotations: { readOnlyHint: true },
+    },
+    async ({ limit, maxId, minId }) => {
+      if (!hasScope(dependencies, 'untappd:read')) {
+        return scopeError('untappd:read');
+      }
+      try {
+        const feed = await withCredential(dependencies, credential =>
+          dependencies.untappd.getFriendFeed(credential.accessToken, { limit, maxId, minId })
+        );
+        return feed === null ? untappdNotConnected(dependencies) : jsonResult(feed);
+      } catch (error) {
+        return handleUntappdError(error);
+      }
+    }
+  );
+
+  server.registerTool(
     'check_user_had_beer',
     {
       title: 'Check whether a user has had a beer',
