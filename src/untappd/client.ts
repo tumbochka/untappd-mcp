@@ -502,6 +502,25 @@ export class UntappdClient {
     return this.get(`user/checkins/${encodeURIComponent(username)}`, query, accessToken);
   }
 
+  /**
+   * The connected account's combined friend activity feed (`checkin/recent`) —
+   * everyone they follow, not just one user. Requires the account's own token;
+   * there is no client-credentials fallback because the feed is always "my friends".
+   */
+  async getFriendFeed(
+    accessToken: string,
+    options: { limit: number; maxId?: number; minId?: number }
+  ): Promise<unknown> {
+    const query: Record<string, string> = { limit: String(options.limit) };
+    if (options.maxId !== undefined) {
+      query.max_id = String(options.maxId);
+    }
+    if (options.minId !== undefined) {
+      query.min_id = String(options.minId);
+    }
+    return this.get('checkin/recent', query, accessToken);
+  }
+
   async getUserFriends(
     username: string,
     options: { limit: number; offset: number },

@@ -735,3 +735,19 @@ test('findUserBeer early-stop uses the scanning token’s remaining, not another
   assert.equal(healthy.stoppedForRateLimit, false);
   assert.equal(healthy.requestsUsed, 3);
 });
+
+test('getFriendFeed queries checkin/recent with the account token and pagination params', async () => {
+  let requested: URL | undefined;
+  const fetchImpl = (async (input: string | URL) => {
+    requested = new URL(input);
+    return jsonResponse({ meta: { code: 200 }, response: { checkins: { items: [] } } });
+  }) as unknown as typeof fetch;
+
+  await new UntappdClient(config, fetchImpl).getFriendFeed('tok', { limit: 10, maxId: 555 });
+
+  assert.equal(requested?.pathname, '/v4/checkin/recent');
+  assert.equal(requested?.searchParams.get('access_token'), 'tok');
+  assert.equal(requested?.searchParams.get('limit'), '10');
+  assert.equal(requested?.searchParams.get('max_id'), '555');
+  assert.equal(requested?.searchParams.get('min_id'), null);
+});
