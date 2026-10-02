@@ -521,6 +521,25 @@ export class UntappdClient {
     return this.get('checkin/recent', query, accessToken);
   }
 
+  /**
+   * Public check-in activity at one venue (`venue/checkins`). Works with the
+   * caller's token or the client-credentials fallback.
+   */
+  async getVenueCheckins(
+    venueId: number,
+    options: { limit: number; maxId?: number; minId?: number },
+    accessToken?: string
+  ): Promise<unknown> {
+    const query: Record<string, string> = { limit: String(options.limit) };
+    if (options.maxId !== undefined) {
+      query.max_id = String(options.maxId);
+    }
+    if (options.minId !== undefined) {
+      query.min_id = String(options.minId);
+    }
+    return this.get(`venue/checkins/${venueId}`, query, accessToken);
+  }
+
   async getUserFriends(
     username: string,
     options: { limit: number; offset: number },
