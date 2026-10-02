@@ -751,3 +751,19 @@ test('getFriendFeed queries checkin/recent with the account token and pagination
   assert.equal(requested?.searchParams.get('max_id'), '555');
   assert.equal(requested?.searchParams.get('min_id'), null);
 });
+
+test('getVenueCheckins queries venue/checkins/{id} with pagination params', async () => {
+  let requested: URL | undefined;
+  const fetchImpl = (async (input: string | URL) => {
+    requested = new URL(input);
+    return jsonResponse({ meta: { code: 200 }, response: { checkins: { items: [] } } });
+  }) as unknown as typeof fetch;
+
+  await new UntappdClient(config, fetchImpl).getVenueCheckins(12345, { limit: 25, minId: 777 }, 'tok');
+
+  assert.equal(requested?.pathname, '/v4/venue/checkins/12345');
+  assert.equal(requested?.searchParams.get('access_token'), 'tok');
+  assert.equal(requested?.searchParams.get('limit'), '25');
+  assert.equal(requested?.searchParams.get('min_id'), '777');
+  assert.equal(requested?.searchParams.get('max_id'), null);
+});

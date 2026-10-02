@@ -368,6 +368,36 @@ export function createUntappdMcpServer(dependencies: UntappdMcpDependencies): Mc
   );
 
   server.registerTool(
+    'get_venue_checkins',
+    {
+      title: 'Get recent check-ins at a venue',
+      description:
+        'Return the recent public check-in activity at an Untappd venue, newest first. venueId is Untappd’s ' +
+        'numeric venue id (untappdVenueId from get_my_recent_venues, or venue.venue_id in any check-in). ' +
+        'Pass minId (the newest checkin_id seen) to fetch only newer check-ins; page backwards with maxId.',
+      inputSchema: z.object({
+        venueId: z.number().int().positive().describe('Untappd venue id (not the Foursquare id).'),
+        limit: z.number().int().min(1).max(25).default(25),
+        maxId: z.number().int().positive().optional().describe('Return check-ins older than this checkin_id.'),
+        minId: z.number().int().positive().optional().describe('Return check-ins newer than this checkin_id.'),
+      }),
+      annotations: { readOnlyHint: true },
+    },
+    async ({ venueId, limit, maxId, minId }) => {
+      if (!hasScope(dependencies, 'untappd:read')) {
+        return scopeError('untappd:read');
+      }
+      try {
+        return jsonResult(
+          await dependencies.untappd.getVenueCheckins(venueId, { limit, maxId, minId }, await callerAccessToken())
+        );
+      } catch (error) {
+        return handleUntappdError(error);
+      }
+    }
+  );
+
+  server.registerTool(
     'get_user_friends',
     {
       title: 'Get a user’s Untappd friends',
